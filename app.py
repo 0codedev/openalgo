@@ -1,9 +1,12 @@
+import os
+for _k in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "SOCKS_PROXY", "http_proxy", "https_proxy", "all_proxy", "socks_proxy"]:
+    os.environ.pop(_k, None)
+
 # Load and check environment variables before anything else
 from utils.env_check import load_and_check_env_variables  # Import the environment check function
 
 load_and_check_env_variables()
 
-import os
 import re
 import sys
 
@@ -436,6 +439,10 @@ def create_app():
         # Exempt health check endpoints from CSRF (for AWS ELB, K8s probes)
         csrf.exempt(app.view_functions["health_bp.simple_health"])
         csrf.exempt(app.view_functions["health_bp.detailed_health_check"])
+
+        # Exempt sandbox manual delete and public data endpoints from CSRF
+        csrf.exempt(app.view_functions["sandbox_bp.delete_daily_pnl_record"])
+        csrf.exempt(app.view_functions["sandbox_bp.api_my_pnl_data_public"])
 
         # Initialize latency monitoring (after registering API blueprint)
         init_latency_monitoring(app)
@@ -989,13 +996,17 @@ if __name__ == "__main__":
 
         start_ngrok_tunnel(port)
 
-    # Exclude strategies and logs directories from reloader
+    # Exclude strategies, logs, and database files from reloader
     reloader_options = {
         "exclude_patterns": [
             "*/strategies/*",
             "*/log/*",
             "*.log",
             "*.bak",
+            "*.db",
+            "*.sqlite",
+            "*/data/*",
+            "*/database/*",
         ]
     }
     # Suppress Flask/Werkzeug's default startup banner — our banner replaces it
@@ -1051,4 +1062,4 @@ if __name__ == "__main__":
             f"{C}{BL}{H*(_W-2)}{BR}{R}", "",
         ]), flush=True)
 
-    socketio.run(app, host=host_ip, port=port, debug=debug, reloader_options=reloader_options)
+    socketio.run(app, host=host_ip, port=port, debug=debug, reloader_options=reloader_options, allow_unsafe_werkzeug=True)

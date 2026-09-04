@@ -1,4 +1,4 @@
-import { Activity, Briefcase, Calendar, Download, Package, Settings } from 'lucide-react'
+import { Activity, Briefcase, Calendar, Download, Package, Settings, ExternalLink, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
@@ -17,6 +17,7 @@ import { cn, makeFormatCurrency } from '@/lib/utils'
 import { useAuthStore } from '@/stores/authStore'
 
 interface DailyPnL {
+  id?: number
   date: string
   realized_pnl: number
   positions_unrealized: number
@@ -31,6 +32,8 @@ interface Position {
   exchange: string
   product: string
   quantity: number
+  display_qty?: number
+  capital_deployed?: number
   average_price: number
   ltp: number
   today_realized_pnl: number
@@ -83,6 +86,18 @@ function getPnLColor(value: number): string {
   return ''
 }
 
+const openTradingView = (symbol: string) => {
+  if (!symbol) return;
+  let cleanSymbol = symbol.trim().toUpperCase();
+  const optionMatch = cleanSymbol.match(/^([A-Z\-]+)\d{2}[A-Z]{3}\d+(?:CE|PE)$/i);
+  if (optionMatch && optionMatch[1]) {
+    cleanSymbol = optionMatch[1];
+  }
+  cleanSymbol = cleanSymbol.replace('NSE:', '').replace('BSE:', '').replace('NFO:', '');
+  const url = `https://www.tradingview.com/chart/?symbol=NSE:${cleanSymbol}`;
+  window.open(url, '_blank');
+};
+
 export default function SandboxPnL() {
   const { user } = useAuthStore()
   const formatCurrency = useMemo(() => makeFormatCurrency(user?.broker), [user?.broker])
@@ -109,6 +124,31 @@ export default function SandboxPnL() {
     } catch (_error) {
     } finally {
       setIsLoading(false)
+    }
+  }
+
+  const handleDeleteDaily = async (id: number, dateStr: string) => {
+    if (!window.confirm(`Are you sure you want to delete the daily P&L snapshot for ${dateStr}?`)) {
+      return
+    }
+    try {
+      const response = await fetch(`/sandbox/mypnl/api/daily/${id}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      })
+      if (response.ok) {
+        const result = await response.json()
+        if (result.status === 'success') {
+          fetchData()
+        } else {
+          alert(result.message || 'Failed to delete record')
+        }
+      } else {
+        alert('Failed to delete record')
+      }
+    } catch (error) {
+      console.error(error)
+      alert('An error occurred while deleting the record')
     }
   }
 
@@ -271,6 +311,7 @@ export default function SandboxPnL() {
                         <TableHead className="text-right">Total Unrealized</TableHead>
                         <TableHead className="text-right">Total MTM</TableHead>
                         <TableHead className="text-right">Portfolio Value</TableHead>
+                        <TableHead className="text-center w-[80px]">Actions</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -302,6 +343,18 @@ export default function SandboxPnL() {
                           </TableCell>
                           <TableCell className="text-right text-primary">
                             {formatCurrency(day.portfolio_value)}
+                          </TableCell>
+                          <TableCell className="text-center">
+                            {day.id && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                                onClick={() => handleDeleteDaily(day.id!, day.date)}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            )}
                           </TableCell>
                         </TableRow>
                       ))}
@@ -342,6 +395,7 @@ export default function SandboxPnL() {
                         <TableHead>Product</TableHead>
                         <TableHead className="text-right">Qty</TableHead>
                         <TableHead className="text-right">Avg Price</TableHead>
+                        <TableHead className="text-right">Capital Deployed</TableHead>
                         <TableHead className="text-right">LTP</TableHead>
                         <TableHead className="text-right">Today's P&L</TableHead>
                         <TableHead className="text-right">All-Time P&L</TableHead>
@@ -352,7 +406,16 @@ export default function SandboxPnL() {
                     <TableBody>
                       {data.positions.map((pos, index) => (
                         <TableRow key={index}>
-                          <TableCell className="font-semibold">{pos.symbol}</TableCell>
+                          <TableCell className="font-semibold">
+                            <button
+                              onClick={() => openTradingView(pos.symbol)}
+                              className="hover:text-primary transition-colors flex items-center gap-1.5 text-left font-semibold"
+                              title="Open chart in TradingView"
+                            >
+                              {pos.symbol}
+                              <ExternalLink className="h-3.5 w-3.5 opacity-60" />
+                            </button>
+                          </TableCell>
                           <TableCell>
                             <Badge variant="outline">{pos.exchange}</Badge>
                           </TableCell>
@@ -369,9 +432,12 @@ export default function SandboxPnL() {
                               {pos.product}
                             </Badge>
                           </TableCell>
-                          <TableCell className="text-right">{pos.quantity}</TableCell>
+                          <TableCell className="text-right">{pos.display_qty ?? pos.quantity}</TableCell>
                           <TableCell className="text-right">
                             {formatCurrency(pos.average_price)}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            {formatCurrency(pos.capital_deployed ?? 0)}
                           </TableCell>
                           <TableCell className="text-right">{formatCurrency(pos.ltp)}</TableCell>
                           <TableCell
@@ -438,7 +504,16 @@ export default function SandboxPnL() {
                     <TableBody>
                       {data.holdings.map((holding, index) => (
                         <TableRow key={index}>
-                          <TableCell className="font-semibold">{holding.symbol}</TableCell>
+                          <TableCell className="font-semibold">
+                            <button
+                              onClick={() => openTradingView(holding.symbol)}
+                              className="hover:text-primary transition-colors flex items-center gap-1.5 text-left font-semibold"
+                              title="Open chart in TradingView"
+                            >
+                              {holding.symbol}
+                              <ExternalLink className="h-3.5 w-3.5 opacity-60" />
+                            </button>
+                          </TableCell>
                           <TableCell>
                             <Badge variant="outline">{holding.exchange}</Badge>
                           </TableCell>
@@ -509,7 +584,16 @@ export default function SandboxPnL() {
                           <TableCell className="font-mono text-xs">
                             {trade.tradeid.slice(0, 12)}...
                           </TableCell>
-                          <TableCell className="font-semibold">{trade.symbol}</TableCell>
+                          <TableCell className="font-semibold">
+                            <button
+                              onClick={() => openTradingView(trade.symbol)}
+                              className="hover:text-primary transition-colors flex items-center gap-1.5 text-left font-semibold"
+                              title="Open chart in TradingView"
+                            >
+                              {trade.symbol}
+                              <ExternalLink className="h-3.5 w-3.5 opacity-60" />
+                            </button>
+                          </TableCell>
                           <TableCell>
                             <Badge variant="outline">{trade.exchange}</Badge>
                           </TableCell>

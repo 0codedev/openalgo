@@ -30,7 +30,7 @@ logger = get_logger(__name__)
 alert_executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="telegram_alert")
 
 # Synchronous HTTP client for Telegram Bot API calls (thread-safe)
-_http_client = httpx.Client(timeout=30.0)
+_http_client = httpx.Client(timeout=30.0, trust_env=False)
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
 
