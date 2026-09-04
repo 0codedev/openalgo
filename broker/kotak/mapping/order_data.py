@@ -1,10 +1,38 @@
-import json
-
 from broker.kotak.mapping.transform_data import map_exchange
 from database.token_db import get_oa_symbol, get_symbol
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def _openalgo_symbol(row, exchange):
+    """Resolve one Kotak row to its OpenAlgo symbol.
+
+    Token first, then the broker trading symbol. The fallback is not
+    belt-and-braces: Kotak populates "tok" on orderbook rows but leaves it as
+    an empty string on tradebook rows, so a token-only lookup silently leaks
+    the raw broker symbol ("YESBANK-EQ") into the UI, which then fails every
+    downstream lookup that expects an OpenAlgo symbol. brsymbol in the master
+    contract is pTrdSymbol (master_contract_db.py:155), i.e. exactly the value
+    Kotak sends as trdSym.
+    """
+    token = str(row.get("tok") or "").strip()
+    if token:
+        mapped = get_symbol(token, exchange)
+        if mapped:
+            return mapped
+
+    broker_symbol = row.get("trdSym") or row.get("sym") or ""
+    if broker_symbol:
+        mapped = get_oa_symbol(broker_symbol, exchange)
+        if mapped:
+            return mapped
+
+    logger.debug(
+        f"No OpenAlgo symbol for token '{token}' / symbol '{broker_symbol}' on {exchange}. "
+        "Keeping the broker trading symbol."
+    )
+    return None
 
 
 def map_order_data(order_data):
@@ -21,7 +49,7 @@ def map_order_data(order_data):
     # if order_data has key 'data' and its value is None
 
     if order_data["stat"] == "Not_Ok":
-        logger.info("No data available.")
+        logger.debug("No data available.")
         order_data = {}  # or set it to an empty list if it's supposed to be a list
         return order_data
 
@@ -29,28 +57,19 @@ def map_order_data(order_data):
         # Handle the case where there is no data
         # For example, you might want to display a message to the user
         # or pass an empty list or dictionary to the template.
-        logger.info("No data available.")
+        logger.debug("No data available.")
         order_data = {}  # or set it to an empty list if it's supposed to be a list
     else:
         order_data = order_data["data"]
 
     if order_data:
         for order in order_data:
-            # Extract the instrument_token and exchange for the current order
-            symboltoken = order["tok"]
             exchange = map_exchange(order["exSeg"])
             order["exSeg"] = exchange
 
-            # Use the get_symbol function to fetch the symbol from the database
-            symbol_from_db = get_symbol(symboltoken, exchange)
-
-            # Check if a symbol was found; if so, update the trading_symbol in the current order
+            symbol_from_db = _openalgo_symbol(order, exchange)
             if symbol_from_db:
                 order["trdSym"] = symbol_from_db
-            else:
-                logger.info(
-                    f"Symbol not found for token {symboltoken} and exchange {exchange}. Keeping original trading symbol."
-                )
     return order_data
 
 
@@ -163,7 +182,7 @@ def map_trade_data(trade_data):
     - The modified order_data with updated 'tradingsymbol' and 'product' fields.
     """
     if trade_data["stat"] == "Not_Ok":
-        logger.info("No data available.")
+        logger.debug("No data available.")
         trade_data = {}  # or set it to an empty list if it's supposed to be a list
         return trade_data
         # Check if 'data' is None
@@ -171,36 +190,26 @@ def map_trade_data(trade_data):
         # Handle the case where there is no data
         # For example, you might want to display a message to the user
         # or pass an empty list or dictionary to the template.
-        logger.info("No data available.")
+        logger.debug("No data available.")
         trade_data = {}  # or set it to an empty list if it's supposed to be a list
     else:
         trade_data = trade_data["data"]
 
     if trade_data:
         for order in trade_data:
-            # Extract the instrument_token and exchange for the current order
-            symbol = order["tok"]
             exchange = map_exchange(order["exSeg"])
             order["exSeg"] = exchange
-            logger.info(f"{symbol}")
-            logger.info(f"{exchange}")
-            # Use the get_symbol function to fetch the symbol from the database
-            symbol_from_db = get_symbol(symbol, exchange)
-            logger.info(f"{symbol_from_db}")
-            # Check if a symbol was found; if so, update the trading_symbol in the current order
+
+            symbol_from_db = _openalgo_symbol(order, exchange)
             if symbol_from_db:
                 order["trdSym"] = symbol_from_db
-            else:
-                logger.info(
-                    f"Unable to find the symbol {symbol} and exchange {exchange}. Keeping original trading symbol."
-                )
 
             # Map transaction type regardless of symbol lookup result
             if order["trnsTp"] == "B":
                 order["trnsTp"] = "BUY"
             elif order["trnsTp"] == "S":
                 order["trnsTp"] = "SELL"
-    logger.info(f"{trade_data}")
+    logger.debug(f"Mapped Kotak tradebook: {trade_data}")
     return trade_data
 
 
@@ -227,30 +236,136 @@ def map_position_data(position_data):
     return map_order_data(position_data)
 
 
+def _number(position, field):
+    """One of Kotak's numeric position fields as a float.
+
+    Kotak sends these as strings, and an optional one can arrive as null or
+    empty on a row that never had that leg - float() raises on both, which
+    would abort the entire position book over a single field on a single row.
+    Anything unusable reads as zero, which is what the field's absence already
+    meant.
+
+    Args:
+        position: One raw Kotak position row.
+        field: The field name to read.
+
+    Returns:
+        float: The field's value, or 0.0 if it is absent, null or not a number.
+    """
+    try:
+        return float(position.get(field) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _price_factor(position):
+    """The price scaling terms of Kotak's documented P&L formula.
+
+    "multiplier * (genNum/genDen) * (prcNum/prcDen)", which scales the
+    mark-to-market leg. Every one of them is "1" on the segments reachable
+    through OpenAlgo today, so this is a no-op in practice - but they are the
+    documented terms, and a field that arrives absent, unparseable or zero must
+    not take the whole position book down with a ZeroDivisionError.
+
+    Args:
+        position: One raw Kotak position row.
+
+    Returns:
+        float: The combined scaling factor, 1.0 when Kotak sends nothing usable.
+    """
+
+    def term(field):
+        return _number(position, field) or 1.0
+
+    return (
+        term("multiplier") * (term("genNum") / term("genDen")) * (term("prcNum") / term("prcDen"))
+    )
+
+
 def transform_positions_data(positions_data):
     transformed_data = []
     for position in positions_data:
+        # "_ltp" is a scratch field get_positions() stamps on before this
+        # function runs (see order_api.py's _backfill_ltp) - Kotak's own
+        # positions endpoint never returns a live price at all, open or closed,
+        # unlike Zerodha's (which reads "last_price" directly from Kite here).
+        # Kept unrounded for the P&L arithmetic below and rounded only on the
+        # way out: CDS prices carry four decimals (USDINR ticks at 0.0025), so
+        # marking a position against the display value costs real money on a
+        # large one.
+        ltp = _number(position, "_ltp")
         transformed_position = {
             "symbol": position.get("trdSym", ""),
             "exchange": position.get("exSeg", ""),
             "product": position.get("prod", ""),
-            "quantity": (int(position.get("flBuyQty", 0)) - int(position.get("flSellQty", 0)))
-            + (int(position.get("cfBuyQty", 0)) - int(position.get("cfSellQty", 0))),
+            "quantity": int(
+                (_number(position, "flBuyQty") - _number(position, "flSellQty"))
+                + (_number(position, "cfBuyQty") - _number(position, "cfSellQty"))
+            ),
             "average_price": position.get("avgnetprice", 0.0),
+            # Matches Zerodha's "ltp" key/shape exactly so every consumer of
+            # transform_positions_data can treat brokers uniformly - always
+            # present, defaults to 0.0 if the backfill couldn't resolve a quote.
+            "ltp": round(ltp, 2),
         }
-        buy_qty = float(position.get("flBuyQty", 0))
-        sell_qty = float(position.get("flSellQty", 0))
+        # Totals across the carried-forward leg and today's, which Kotak keeps
+        # in separate fields. "quantity" above already sums both, so the average
+        # has to as well: dividing today's amount by today's quantity reported
+        # 0.00 for a position carried forward with no fills today, because
+        # flBuyQty is 0 there and the branch fell through to the zero default.
+        # That then also stopped the positions page marking the position to
+        # market, since it only computes an unrealized P&L when average_price is
+        # above zero - so a carried-forward holding showed no cost and no P&L.
+        total_buy_amt = _number(position, "cfBuyAmt") + _number(position, "buyAmt")
+        total_sell_amt = _number(position, "cfSellAmt") + _number(position, "sellAmt")
+        buy_qty = _number(position, "flBuyQty") + _number(position, "cfBuyQty")
+        sell_qty = _number(position, "flSellQty") + _number(position, "cfSellQty")
 
         if transformed_position["quantity"] > 0 and buy_qty > 0:
-            transformed_position["average_price"] = round(
-                float(position.get("buyAmt", 0)) / buy_qty, 2
-            )
+            transformed_position["average_price"] = round(total_buy_amt / buy_qty, 2)
         elif transformed_position["quantity"] < 0 and sell_qty > 0:
-            transformed_position["average_price"] = round(
-                float(position.get("sellAmt", 0)) / sell_qty, 2
-            )
+            transformed_position["average_price"] = round(total_sell_amt / sell_qty, 2)
         elif transformed_position["quantity"] != 0:
             transformed_position["average_price"] = 0.0
+
+        # Kotak's documented "Profit N Loss" formula (Positions.md), in full:
+        #
+        #   PnL = (Total Sell Amt - Total Buy Amt)
+        #         + Net Qty * LTP * multiplier * (genNum/genDen) * (prcNum/prcDen)
+        #
+        # The amount difference is the realized leg; the Net Qty term marks an
+        # open position to market. Kotak's positions endpoint returns no pnl
+        # field of its own, so it has to be computed here. Writing the whole
+        # formula rather than the two halves separately is deliberate: it
+        # collapses to the realized-only form when Net Qty is 0, so a
+        # fully-closed leg keeps reporting exactly what #1970's fix gave it.
+        # cfBuyAmt/cfSellAmt are included so a leg carried forward reports its
+        # entire P&L, not just today's slice.
+        #
+        # "pnl" is set on every row, open or closed, because that is the shape
+        # the rest of the platform already expects from the other broker
+        # adapters: the positions CSV writes a P&L column, and Flow's Position
+        # Check reads pos.get("pnl", 0) for its pnl_above/pnl_below guards. With
+        # the key absent on open positions those guards read 0 and could never
+        # fire - which is the half a closed-position-only fix leaves broken,
+        # since a P&L stop is only meaningful while the position is still open.
+        realized = total_sell_amt - total_buy_amt
+        net_qty = transformed_position["quantity"]
+
+        if not net_qty:
+            transformed_position["pnl"] = round(realized, 2)
+        elif ltp:
+            transformed_position["pnl"] = round(
+                realized + net_qty * ltp * _price_factor(position), 2
+            )
+        else:
+            # Open, but with no price to mark against - the LTP backfill in
+            # order_api.py is best-effort and leaves the row alone when the
+            # quotes call fails. The realized leg on its own is not a P&L: for
+            # a freshly opened long it is the entire cost of the position and
+            # would read as a total loss. Report 0.0, which is what every
+            # consumer already fell back to while the key was missing.
+            transformed_position["pnl"] = 0.0
 
         transformed_data.append(transformed_position)
 
@@ -259,8 +374,8 @@ def transform_positions_data(positions_data):
 
 def transform_holdings_data(holdings_data):
     transformed_data = []
-    logger.info("Holdings Data")
-    logger.info(f"{holdings_data}")
+    logger.debug("Holdings Data")
+    logger.debug(f"{holdings_data}")
     for holding in holdings_data:
         transformed_position = {
             "symbol": holding.get("displaySymbol", ""),
@@ -283,8 +398,8 @@ def transform_holdings_data(holdings_data):
         }
 
         transformed_data.append(transformed_position)
-    logger.info("Holdings Data")
-    logger.info(f"{transformed_data}")
+    logger.debug("Holdings Data")
+    logger.debug(f"{transformed_data}")
     return transformed_data
 
 
@@ -302,7 +417,7 @@ def map_portfolio_data(portfolio_data):
     """
     # Check if 'data' is None or doesn't contain 'holdings'
     if portfolio_data.get("data") is None:
-        logger.info("No data available.")
+        logger.debug("No data available.")
         # Return an empty structure or handle this scenario as needed
         return {}
 
@@ -324,7 +439,7 @@ def map_portfolio_data(portfolio_data):
         if portfolio["instrumentType"] == "Equity":
             portfolio["instrumentType"] = "CNC"  # Modify 'product' field
         else:
-            logger.info("Kotak Portfolio - Product Value for Delivery Not Found or Changed.")
+            logger.debug("Kotak Portfolio - Product Value for Delivery Not Found or Changed.")
 
     # The function already works with 'data', which includes 'holdings' and 'totalholding',
     # so we can return 'data' directly without additional modifications.

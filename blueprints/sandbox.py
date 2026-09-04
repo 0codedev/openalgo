@@ -139,6 +139,14 @@ def api_get_configs():
                 "value": "5",
                 "description": "Interval to update MTM (0-60 sec)",
             },
+            "expiry_settlement_timing": {
+                "value": "expiry_day_close",
+                "description": "When expired F&O contracts settle",
+            },
+            "option_expiry_settlement": {
+                "value": "ltp",
+                "description": "Settlement price for expired options",
+            },
         }
 
         # Helper to get config with fallback to default
@@ -179,6 +187,13 @@ def api_get_configs():
                 "configs": {
                     "order_check_interval": get_config_value("order_check_interval"),
                     "mtm_update_interval": get_config_value("mtm_update_interval"),
+                },
+            },
+            "expiry": {
+                "title": "F&O Expiry Settlement",
+                "configs": {
+                    "expiry_settlement_timing": get_config_value("expiry_settlement_timing"),
+                    "option_expiry_settlement": get_config_value("option_expiry_settlement"),
                 },
             },
         }
@@ -449,270 +464,174 @@ def squareoff_status():
         ), 500
 
 
-def _get_sandbox_pnl_data_internal(user_id):
-    from decimal import Decimal
-    from database.sandbox_db import (
-        SandboxDailyPnL,
-        SandboxFunds,
-        SandboxHoldings,
-        SandboxPositions,
-        SandboxTrades,
-    )
-
-    # Get all positions (both open and closed) for P&L history
-    positions = (
-        SandboxPositions.query.filter_by(user_id=user_id)
-        .order_by(SandboxPositions.updated_at.desc())
-        .all()
-    )
-
-    # Get holdings for P&L
-    holdings = (
-        SandboxHoldings.query.filter_by(user_id=user_id)
-        .order_by(SandboxHoldings.updated_at.desc())
-        .all()
-    )
-
-    # Get funds for summary
-    funds = SandboxFunds.query.filter_by(user_id=user_id).first()
-
-    # Get all sandbox trades to calculate original traded quantity for closed positions
-    user_trades = SandboxTrades.query.filter_by(user_id=user_id).all()
-    trades_by_symbol = {}
-    for t in user_trades:
-        sym = t.symbol
-        if sym not in trades_by_symbol:
-            trades_by_symbol[sym] = []
-        trades_by_symbol[sym].append(t)
-
-    # Prepare position data
-    position_list = []
-    positions_unrealized = Decimal("0.00")
-
-    for pos in positions:
-        today_realized = Decimal(str(pos.today_realized_pnl or 0))
-        all_time_realized = Decimal(str(pos.accumulated_realized_pnl or 0))
-        unrealized = Decimal(str(pos.pnl or 0)) if pos.quantity != 0 else Decimal("0.00")
-
-        if pos.quantity != 0:
-            positions_unrealized += unrealized
-
-        # Calculate actual display quantity, direction, entry/exit prices, and capital deployed
-        pos_trades = trades_by_symbol.get(pos.symbol, [])
-        buy_trades = [t for t in pos_trades if t.action.upper() == 'BUY']
-        sell_trades = [t for t in pos_trades if t.action.upper() == 'SELL']
-        
-        buy_qty = sum(int(t.quantity) for t in buy_trades)
-        sell_qty = sum(int(t.quantity) for t in sell_trades)
-        
-        avg_buy_price = float(sum(float(t.price) * int(t.quantity) for t in buy_trades) / buy_qty) if buy_qty > 0 else 0.0
-        avg_sell_price = float(sum(float(t.price) * int(t.quantity) for t in sell_trades) / sell_qty) if sell_qty > 0 else 0.0
-        
-        # Find first trade to determine direction
-        first_trade = min(pos_trades, key=lambda t: t.trade_timestamp) if pos_trades else None
-        direction = "Long"
-        if first_trade and first_trade.action.upper() == "SELL":
-            direction = "Short"
-            
-        entry_price = avg_buy_price if direction == "Long" else avg_sell_price
-        
-        # If closed (pos.quantity == 0), the exit price is the average price of the opposite trades
-        if pos.quantity == 0:
-            display_qty = max(buy_qty, sell_qty)
-            exit_price = avg_sell_price if direction == "Long" else avg_buy_price
-            pnl = float(all_time_realized)
-        else:
-            display_qty = abs(pos.quantity)
-            exit_price = float(pos.ltp) if pos.ltp else 0.0
-            pnl = float(unrealized)
-            
-        capital_deployed = float(display_qty) * entry_price
-
-        position_list.append(
-            {
-                "symbol": pos.symbol,
-                "exchange": pos.exchange,
-                "product": pos.product,
-                "quantity": pos.quantity,
-                "display_qty": display_qty,
-                "direction": direction,
-                "entry_price": entry_price,
-                "exit_price": exit_price,
-                "pnl": pnl,
-                "capital_deployed": capital_deployed,
-                "average_price": float(pos.average_price or 0),
-                "ltp": float(pos.ltp) if pos.ltp else 0.0,
-                "unrealized_pnl": float(unrealized),
-                "today_realized_pnl": float(today_realized),
-                "all_time_realized_pnl": float(all_time_realized),
-                "status": "Open" if pos.quantity != 0 else "Closed",
-                "updated_at": pos.updated_at.strftime("%Y-%m-%d %H:%M:%S")
-                if pos.updated_at
-                else "",
-            }
-        )
-
-    # Prepare holdings data
-    holdings_list = []
-    holdings_unrealized = Decimal("0.00")
-
-    for holding in holdings:
-        if holding.quantity != 0:
-            unrealized = Decimal(str(holding.pnl or 0))
-            holdings_unrealized += unrealized
-
-            holdings_list.append(
-                {
-                    "symbol": holding.symbol,
-                    "exchange": holding.exchange,
-                    "product": "CNC",
-                    "quantity": holding.quantity,
-                    "average_price": float(holding.average_price),
-                    "ltp": float(holding.ltp) if holding.ltp else 0.0,
-                    "unrealized_pnl": float(unrealized),
-                    "pnl_percent": float(holding.pnl_percent or 0),
-                    "settlement_date": holding.settlement_date.strftime("%Y-%m-%d")
-                    if holding.settlement_date
-                    else "",
-                }
-            )
-
-    # Get recent trades
-    trades = (
-        SandboxTrades.query.filter_by(user_id=user_id)
-        .order_by(SandboxTrades.trade_timestamp.desc())
-        .limit(50)
-        .all()
-    )
-
-    trade_list = []
-    for trade in trades:
-        trade_list.append(
-            {
-                "tradeid": trade.tradeid,
-                "symbol": trade.symbol,
-                "exchange": trade.exchange,
-                "action": trade.action,
-                "quantity": trade.quantity,
-                "price": float(trade.price),
-                "product": trade.product,
-                "timestamp": trade.trade_timestamp.strftime("%Y-%m-%d %H:%M:%S")
-                if trade.trade_timestamp
-                else "",
-            }
-        )
-
-    # Get date-wise P&L history (last 30 days)
-    from database.sandbox_db import SandboxDailyPnL
-
-    daily_pnl_records = (
-        SandboxDailyPnL.query.filter_by(user_id=user_id)
-        .order_by(SandboxDailyPnL.date.desc())
-        .limit(30)
-        .all()
-    )
-
-    daily_pnl_list = []
-    for record in daily_pnl_records:
-        daily_pnl_list.append(
-            {
-                "id": record.id,
-                "date": record.date.strftime("%Y-%m-%d"),
-                "realized_pnl": float(record.realized_pnl or 0),
-                "positions_unrealized": float(record.positions_unrealized_pnl or 0),
-                "holdings_unrealized": float(record.holdings_unrealized_pnl or 0),
-                "total_unrealized": float(
-                    (record.positions_unrealized_pnl or 0)
-                    + (record.holdings_unrealized_pnl or 0)
-                ),
-                "total_mtm": float(record.total_mtm or 0),
-                "portfolio_value": float(record.portfolio_value or 0),
-            }
-        )
-
-    # Calculate today's live P&L (not yet snapshotted)
-    today_realized = Decimal(str(funds.today_realized_pnl or 0)) if funds else Decimal("0.00")
-    total_unrealized = positions_unrealized + holdings_unrealized
-    today_total_mtm = today_realized + total_unrealized
-
-    # Summary data
-    summary = {
-        "today_realized_pnl": float(today_realized),
-        "all_time_realized_pnl": float(funds.realized_pnl or 0) if funds else 0.0,
-        "positions_unrealized_pnl": float(positions_unrealized),
-        "holdings_unrealized_pnl": float(holdings_unrealized),
-        "total_unrealized_pnl": float(total_unrealized),
-        "today_total_mtm": float(today_total_mtm),
-        "total_pnl": float(funds.total_pnl or 0) if funds else 0.0,
-        "available_balance": float(funds.available_balance or 0) if funds else 0.0,
-        "total_capital": float(funds.total_capital or 0) if funds else 0.0,
-    }
-
-    return {
-        "summary": summary,
-        "daily_pnl": daily_pnl_list,
-        "positions": position_list,
-        "holdings": holdings_list,
-        "trades": trade_list,
-    }
-
-
 @sandbox_bp.route("/mypnl/api/data")
 @check_session_validity
 @limiter.limit(API_RATE_LIMIT)
 def api_my_pnl_data():
     """API endpoint to get P&L data as JSON for React frontend"""
     try:
+        from decimal import Decimal
+
         user_id = session.get("user")
-        data = _get_sandbox_pnl_data_internal(user_id)
-        return jsonify({"status": "success", "data": data})
+
+        # Get all positions (both open and closed) for P&L history
+        positions = (
+            SandboxPositions.query.filter_by(user_id=user_id)
+            .order_by(SandboxPositions.updated_at.desc())
+            .all()
+        )
+
+        # Get holdings for P&L
+        holdings = (
+            SandboxHoldings.query.filter_by(user_id=user_id)
+            .order_by(SandboxHoldings.updated_at.desc())
+            .all()
+        )
+
+        # Get funds for summary
+        funds = SandboxFunds.query.filter_by(user_id=user_id).first()
+
+        # Prepare position data
+        position_list = []
+        positions_unrealized = Decimal("0.00")
+
+        for pos in positions:
+            today_realized = Decimal(str(pos.today_realized_pnl or 0))
+            all_time_realized = Decimal(str(pos.accumulated_realized_pnl or 0))
+            unrealized = Decimal(str(pos.pnl or 0)) if pos.quantity != 0 else Decimal("0.00")
+
+            if pos.quantity != 0:
+                positions_unrealized += unrealized
+
+            position_list.append(
+                {
+                    "symbol": pos.symbol,
+                    "exchange": pos.exchange,
+                    "product": pos.product,
+                    "quantity": pos.quantity,
+                    "average_price": float(pos.average_price),
+                    "ltp": float(pos.ltp) if pos.ltp else 0.0,
+                    "unrealized_pnl": float(unrealized),
+                    "today_realized_pnl": float(today_realized),
+                    "all_time_realized_pnl": float(all_time_realized),
+                    "status": "Open" if pos.quantity != 0 else "Closed",
+                    "updated_at": pos.updated_at.strftime("%Y-%m-%d %H:%M:%S")
+                    if pos.updated_at
+                    else "",
+                }
+            )
+
+        # Prepare holdings data
+        holdings_list = []
+        holdings_unrealized = Decimal("0.00")
+
+        for holding in holdings:
+            if holding.quantity != 0:
+                unrealized = Decimal(str(holding.pnl or 0))
+                holdings_unrealized += unrealized
+
+                holdings_list.append(
+                    {
+                        "symbol": holding.symbol,
+                        "exchange": holding.exchange,
+                        "product": "CNC",
+                        "quantity": holding.quantity,
+                        "average_price": float(holding.average_price),
+                        "ltp": float(holding.ltp) if holding.ltp else 0.0,
+                        "unrealized_pnl": float(unrealized),
+                        "pnl_percent": float(holding.pnl_percent or 0),
+                        "settlement_date": holding.settlement_date.strftime("%Y-%m-%d")
+                        if holding.settlement_date
+                        else "",
+                    }
+                )
+
+        # Get recent trades
+        trades = (
+            SandboxTrades.query.filter_by(user_id=user_id)
+            .order_by(SandboxTrades.trade_timestamp.desc())
+            .limit(50)
+            .all()
+        )
+
+        trade_list = []
+        for trade in trades:
+            trade_list.append(
+                {
+                    "tradeid": trade.tradeid,
+                    "symbol": trade.symbol,
+                    "exchange": trade.exchange,
+                    "action": trade.action,
+                    "quantity": trade.quantity,
+                    "price": float(trade.price),
+                    "product": trade.product,
+                    "timestamp": trade.trade_timestamp.strftime("%Y-%m-%d %H:%M:%S")
+                    if trade.trade_timestamp
+                    else "",
+                }
+            )
+
+        # Get date-wise P&L history (last 30 days)
+        from database.sandbox_db import SandboxDailyPnL
+
+        daily_pnl_records = (
+            SandboxDailyPnL.query.filter_by(user_id=user_id)
+            .order_by(SandboxDailyPnL.date.desc())
+            .limit(30)
+            .all()
+        )
+
+        daily_pnl_list = []
+        for record in daily_pnl_records:
+            daily_pnl_list.append(
+                {
+                    "date": record.date.strftime("%Y-%m-%d"),
+                    "realized_pnl": float(record.realized_pnl or 0),
+                    "positions_unrealized": float(record.positions_unrealized_pnl or 0),
+                    "holdings_unrealized": float(record.holdings_unrealized_pnl or 0),
+                    "total_unrealized": float(
+                        (record.positions_unrealized_pnl or 0)
+                        + (record.holdings_unrealized_pnl or 0)
+                    ),
+                    "total_mtm": float(record.total_mtm or 0),
+                    "portfolio_value": float(record.portfolio_value or 0),
+                }
+            )
+
+        # Calculate today's live P&L (not yet snapshotted)
+        today_realized = Decimal(str(funds.today_realized_pnl or 0)) if funds else Decimal("0.00")
+        total_unrealized = positions_unrealized + holdings_unrealized
+        today_total_mtm = today_realized + total_unrealized
+
+        # Summary data
+        summary = {
+            "today_realized_pnl": float(today_realized),
+            "all_time_realized_pnl": float(funds.realized_pnl or 0) if funds else 0.0,
+            "positions_unrealized_pnl": float(positions_unrealized),
+            "holdings_unrealized_pnl": float(holdings_unrealized),
+            "total_unrealized_pnl": float(total_unrealized),
+            "today_total_mtm": float(today_total_mtm),
+            "total_pnl": float(funds.total_pnl or 0) if funds else 0.0,
+            "available_balance": float(funds.available_balance or 0) if funds else 0.0,
+            "total_capital": float(funds.total_capital or 0) if funds else 0.0,
+        }
+
+        return jsonify(
+            {
+                "status": "success",
+                "data": {
+                    "summary": summary,
+                    "daily_pnl": daily_pnl_list,
+                    "positions": position_list,
+                    "holdings": holdings_list,
+                    "trades": trade_list,
+                },
+            }
+        )
+
     except Exception as e:
         logger.exception(f"Error getting P&L data: {str(e)}")
         return jsonify({"status": "error", "message": f"Error loading P&L data: {str(e)}"}), 500
-
-
-@sandbox_bp.route("/mypnl/api/data/public", methods=["GET", "POST"])
-@limiter.limit(API_RATE_LIMIT)
-def api_my_pnl_data_public():
-    """Public endpoint to get P&L data using API key auth"""
-    try:
-        api_key = request.headers.get("X-API-Key") or request.args.get("apikey")
-        if not api_key and request.is_json:
-            api_key = request.json.get("apikey")
-            
-        if not api_key:
-            return jsonify({"status": "error", "message": "API key required"}), 401
-            
-        from database.auth_db import get_api_key_for_tradingview
-        valid_key = get_api_key_for_tradingview("admin") or os.getenv("OPENALGO_API_KEY", "openalgo_mcp_api_key_2026")
-        if api_key != valid_key:
-            return jsonify({"status": "error", "message": "Invalid API key"}), 403
-            
-        data = _get_sandbox_pnl_data_internal("admin")
-        return jsonify({"status": "success", "data": data})
-    except Exception as e:
-        logger.exception(f"Error getting public P&L data: {str(e)}")
-        return jsonify({"status": "error", "message": f"Error loading public P&L data: {str(e)}"}), 500
-
-
-@sandbox_bp.route("/mypnl/api/daily/<int:record_id>", methods=["DELETE"])
-@check_session_validity
-@limiter.limit(API_RATE_LIMIT)
-def delete_daily_pnl_record(record_id):
-    """Delete a daily P&L record by ID"""
-    try:
-        user_id = session.get("user")
-        from database.sandbox_db import SandboxDailyPnL, db_session
-        record = SandboxDailyPnL.query.filter_by(id=record_id, user_id=user_id).first()
-        if not record:
-            return jsonify({"status": "error", "message": "Record not found"}), 404
-        db_session.delete(record)
-        db_session.commit()
-        return jsonify({"status": "success", "message": "Record deleted successfully"})
-    except Exception as e:
-        db_session.rollback()
-        logger.exception(f"Error deleting daily P&L record: {str(e)}")
-        return jsonify({"status": "error", "message": f"Error deleting record: {str(e)}"}), 500
 
 
 @sandbox_bp.route("/mypnl")
@@ -957,6 +876,15 @@ def validate_config(config_key, config_value):
             if config_value not in valid_days:
                 return f"Reset day must be one of: {', '.join(valid_days)}"
 
+        # Validate expiry settlement enums
+        if config_key == "expiry_settlement_timing":
+            if config_value not in ("expiry_day_close", "next_day"):
+                return "Expiry settlement timing must be 'expiry_day_close' or 'next_day'"
+
+        if config_key == "option_expiry_settlement":
+            if config_value not in ("ltp", "zero"):
+                return "Option expiry settlement must be 'ltp' or 'zero'"
+
         return None  # No validation error
 
     except Exception as e:
@@ -1023,18 +951,6 @@ def generate_daily_pnl_csv(daily_pnl_records):
 
 def generate_positions_csv(positions):
     """Generate CSV from positions data"""
-    from database.sandbox_db import SandboxTrades
-    
-    # Pre-fetch all user trades
-    user_id = positions[0].user_id if positions else "admin"
-    user_trades = SandboxTrades.query.filter_by(user_id=user_id).all()
-    trades_by_symbol = {}
-    for t in user_trades:
-        sym = t.symbol
-        if sym not in trades_by_symbol:
-            trades_by_symbol[sym] = []
-        trades_by_symbol[sym].append(t)
-
     output = io.StringIO()
     writer = csv.writer(output)
 
@@ -1044,12 +960,12 @@ def generate_positions_csv(positions):
         "Exchange",
         "Product",
         "Quantity",
-        "Direction",
-        "Entry Price",
-        "Exit Price",
-        "Realized P&L",
-        "Capital Deployed",
+        "Average Price",
         "LTP",
+        "Unrealized P&L",
+        "Today Realized P&L",
+        "All-Time Realized P&L",
+        "Margin Blocked",
         "Status",
         "Last Updated",
     ]
@@ -1057,45 +973,18 @@ def generate_positions_csv(positions):
 
     # Write data rows
     for pos in positions:
-        pos_trades = trades_by_symbol.get(pos.symbol, [])
-        buy_trades = [t for t in pos_trades if t.action.upper() == 'BUY']
-        sell_trades = [t for t in pos_trades if t.action.upper() == 'SELL']
-        
-        buy_qty = sum(int(t.quantity) for t in buy_trades)
-        sell_qty = sum(int(t.quantity) for t in sell_trades)
-        
-        avg_buy_price = float(sum(float(t.price) * int(t.quantity) for t in buy_trades) / buy_qty) if buy_qty > 0 else 0.0
-        avg_sell_price = float(sum(float(t.price) * int(t.quantity) for t in sell_trades) / sell_qty) if sell_qty > 0 else 0.0
-        
-        first_trade = min(pos_trades, key=lambda t: t.trade_timestamp) if pos_trades else None
-        direction = "Long"
-        if first_trade and first_trade.action.upper() == "SELL":
-            direction = "Short"
-            
-        entry_price = avg_buy_price if direction == "Long" else avg_sell_price
-        
-        if pos.quantity == 0:
-            display_qty = max(buy_qty, sell_qty)
-            exit_price = avg_sell_price if direction == "Long" else avg_buy_price
-            pnl = float(pos.accumulated_realized_pnl or 0)
-        else:
-            display_qty = abs(pos.quantity)
-            exit_price = float(pos.ltp) if pos.ltp else 0.0
-            pnl = float(pos.pnl or 0)
-            
-        capital_deployed = float(display_qty) * entry_price
-
+        unrealized = float(pos.pnl or 0) if pos.quantity != 0 else 0.0
         row = [
             sanitize_csv_value(pos.symbol),
             sanitize_csv_value(pos.exchange),
             sanitize_csv_value(pos.product),
-            display_qty,
-            direction,
-            entry_price,
-            exit_price,
-            pnl,
-            capital_deployed,
+            pos.quantity,
+            float(pos.average_price),
             float(pos.ltp) if pos.ltp else 0.0,
+            unrealized,
+            float(pos.today_realized_pnl or 0),
+            float(pos.accumulated_realized_pnl or 0),
+            float(pos.margin_blocked or 0),
             "Open" if pos.quantity != 0 else "Closed",
             pos.updated_at.strftime("%Y-%m-%d %H:%M:%S") if pos.updated_at else "",
         ]

@@ -12,7 +12,6 @@ import {
   Settings2,
   X,
   XCircle,
-  ExternalLink,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { type QuotesData, tradingApi } from '@/api/trading'
@@ -128,18 +127,6 @@ const statusConfig: Record<string, { icon: typeof CheckCircle2; color: string; l
   cancelled: { icon: XCircle, color: 'text-gray-500', label: 'cancelled' },
   open: { icon: Clock, color: 'text-blue-500', label: 'open' },
 }
-
-const openTradingView = (symbol: string) => {
-  if (!symbol) return;
-  let cleanSymbol = symbol.trim().toUpperCase();
-  const optionMatch = cleanSymbol.match(/^([A-Z\-]+)\d{2}[A-Z]{3}\d+(?:CE|PE)$/i);
-  if (optionMatch && optionMatch[1]) {
-    cleanSymbol = optionMatch[1];
-  }
-  cleanSymbol = cleanSymbol.replace('NSE:', '').replace('BSE:', '').replace('NFO:', '');
-  const url = `https://www.tradingview.com/chart/?symbol=NSE:${cleanSymbol}`;
-  window.open(url, '_blank');
-};
 
 export default function OrderBook() {
   const { apiKey, user } = useAuthStore()
@@ -728,17 +715,8 @@ export default function OrderBook() {
                         const canCancel = order.order_status === 'open'
 
                         return (
-                          <TableRow key={`${order.orderid}-${index}`} className="group">
-                            <TableCell className="font-medium">
-                              <button
-                                onClick={() => openTradingView(order.symbol)}
-                                className="hover:text-indigo-500 font-medium transition-colors flex items-center gap-1.5 text-left"
-                                title="Open in TradingView"
-                              >
-                                {order.symbol}
-                                <ExternalLink size={12} className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground" />
-                              </button>
-                            </TableCell>
+                          <TableRow key={`${order.orderid}-${index}`}>
+                            <TableCell className="font-medium">{order.symbol}</TableCell>
                             <TableCell>
                               <Badge variant="outline">{order.exchange}</Badge>
                             </TableCell>

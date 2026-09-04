@@ -171,16 +171,29 @@ def _schedule_square_off_jobs(scheduler):
         def capture_daily_pnl_snapshot():
             """Capture end-of-day P&L snapshot for all users"""
             try:
+                from database.market_calendar_db import is_market_holiday
                 from database.sandbox_db import (
                     SandboxDailyPnL,
                     SandboxFunds,
                     SandboxHoldings,
                     SandboxPositions,
-                    SandboxTrades,
                     db_session,
                 )
 
                 today = date.today()
+
+                # Skip weekends and market holidays (issue #876): the cron
+                # fires every day, and on a non-trading day nothing has moved,
+                # so the snapshot just clones the previous session's numbers
+                # into a new dated row -- the "PnL copied to Saturday/Sunday"
+                # duplication. is_market_holiday covers weekends, exchange
+                # holidays, and correctly stays False for special sessions
+                # (e.g. Muhurat trading on a Saturday).
+                if is_market_holiday(today):
+                    logger.debug(
+                        f"Skipping daily P&L snapshot for {today}: not a trading day"
+                    )
+                    return
 
                 # Get all users with funds
                 all_funds = SandboxFunds.query.all()
@@ -206,21 +219,6 @@ def _schedule_square_off_jobs(scheduler):
 
                     # Get today's realized P&L
                     realized_pnl = Decimal(str(funds.today_realized_pnl or 0))
-
-                    # Check if there was any trading activity today
-                    today_start = datetime.combine(today, datetime.min.time())
-                    today_end = datetime.combine(today, datetime.max.time())
-                    
-                    trade_count = SandboxTrades.query.filter(
-                        SandboxTrades.user_id == user_id,
-                        SandboxTrades.trade_timestamp >= today_start,
-                        SandboxTrades.trade_timestamp <= today_end
-                    ).count()
-
-                    # Only create a snapshot if there are active positions, active holdings, today's realized P&L, or trades today
-                    if len(positions) == 0 and len(holdings) == 0 and realized_pnl == 0 and trade_count == 0:
-                        logger.debug(f"Skipping daily snapshot for user {user_id} on {today} (no trades, open positions, or holdings)")
-                        continue
 
                     # Total MTM = Realized + Unrealized (positions + holdings)
                     total_unrealized = positions_unrealized + holdings_unrealized

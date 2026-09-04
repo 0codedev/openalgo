@@ -4,13 +4,14 @@ Handles connection to Flattrade's market data streaming API
 """
 
 import json
-import logging
 import threading
 import time
 from collections.abc import Callable
 from typing import Any, Dict, Optional
 
 import websocket
+
+from utils.logging import get_logger
 
 
 class FlattradeWebSocket:
@@ -31,13 +32,21 @@ class FlattradeWebSocket:
     # Message types
     MSG_TYPE_CONNECT = "a"
     MSG_TYPE_HEARTBEAT = "h"
+    # The doc's heartbeat ack is "hk"; "h" is kept because some Noren
+    # deployments echo the request type back instead.
+    MSG_TYPE_HEARTBEAT_ACK = "hk"
     MSG_TYPE_AUTH_ACK = "ak"
     MSG_TYPE_TOUCHLINE_SUB = "t"
     MSG_TYPE_TOUCHLINE_UNSUB = "u"
     MSG_TYPE_DEPTH_SUB = "d"
     MSG_TYPE_DEPTH_UNSUB = "ud"
 
-    # Authentication response
+    # Authentication response. The doc (09-websocket.md, Connect) writes "Ok"
+    # while the live gateway sends "OK", so the comparison is case-insensitive:
+    # an exact match against either spelling would fail the handshake outright
+    # if Flattrade ever normalised to the other, force-closing the socket and
+    # burning the adapter's bounded auth-retry budget. flattrade_order_adapter's
+    # _noren_text() folds the same way.
     AUTH_SUCCESS = "OK"
 
     def __init__(
@@ -73,6 +82,22 @@ class FlattradeWebSocket:
         self.running = False
         self.connected = False
 
+        # Auth failure state - set when the broker explicitly rejects the
+        # session token (structured "ak" nack or a fatal error/close frame).
+        # The adapter checks this after _on_close/_on_error to route into a
+        # tighter-bounded auth-retry path instead of the generic reconnect loop.
+        self.auth_failed = False
+        self.auth_failure_message = ""
+
+        # (status_code, reason) decoded from a peer-initiated close frame in
+        # _on_error, consumed by _on_close — websocket-client itself forwards
+        # (None, None) in that case. See _close_frame_status.
+        self._pending_close_status: tuple[int, str | None] | None = None
+
+        # Set by stop() to interrupt any in-progress sleep/wait loop immediately
+        # instead of waiting out the full polling granularity.
+        self._stop_event = threading.Event()
+
         # Callbacks
         self.on_message = on_message
         self.on_error = on_error
@@ -85,7 +110,7 @@ class FlattradeWebSocket:
         self._heartbeat_lock = threading.Lock()
 
         # Logging
-        self.logger = logging.getLogger("flattrade_websocket")
+        self.logger = get_logger("flattrade_websocket")
 
     def connect(self) -> bool:
         """
@@ -109,6 +134,13 @@ class FlattradeWebSocket:
     def _initialize_connection(self) -> None:
         """Initialize WebSocket connection and start thread"""
         self.running = True
+        self._stop_event.clear()
+
+        # Reset auth failure state so a stale flag from a previous failed
+        # attempt doesn't block this fresh connection attempt.
+        self.auth_failed = False
+        self.auth_failure_message = ""
+        self._pending_close_status = None
 
         self.ws = websocket.WebSocketApp(
             self.WS_URL,
@@ -134,7 +166,9 @@ class FlattradeWebSocket:
             if self.connected:
                 self.logger.info("WebSocket connected successfully")
                 return True
-            time.sleep(0.1)
+            if self._stop_event.wait(0.1):
+                self.logger.info("Wait for connection interrupted by stop()")
+                return False
 
         self.logger.error("Connection timeout")
         self.stop()
@@ -160,6 +194,7 @@ class FlattradeWebSocket:
 
         self.running = False
         self.connected = False
+        self._stop_event.set()
 
         self._close_websocket()
         self._wait_for_thread_completion()
@@ -181,9 +216,13 @@ class FlattradeWebSocket:
             self.ws_thread.join(timeout=self.THREAD_JOIN_TIMEOUT)
             if self.ws_thread.is_alive():
                 self.logger.warning("WebSocket thread did not terminate within timeout")
-                # Don't clear reference - thread still running, could interfere with reconnect
-                return
-        # Only clear reference if thread actually stopped
+                # Safe to clear the reference even if the join timed out: the
+                # thread is daemon=True so it cannot block process exit, and
+                # _initialize_connection()/_start_heartbeat() overwrite this
+                # attribute with a brand-new thread object on the next connect
+                # regardless. With the _stop_event fix above, the join should
+                # reliably complete near-instantly in practice anyway.
+        # Clear reference unconditionally - see comment above
         self.ws_thread = None
 
     # WebSocket Event Handlers
@@ -246,7 +285,7 @@ class FlattradeWebSocket:
 
             if msg_type == self.MSG_TYPE_AUTH_ACK:
                 return self._handle_auth_response(data)
-            elif msg_type == self.MSG_TYPE_HEARTBEAT:
+            elif msg_type in (self.MSG_TYPE_HEARTBEAT_ACK, self.MSG_TYPE_HEARTBEAT):
                 self.logger.debug("Received heartbeat response")
                 return True
 
@@ -266,21 +305,138 @@ class FlattradeWebSocket:
         Returns:
             bool: True (message handled)
         """
-        if data.get("s") == self.AUTH_SUCCESS:
+        if str(data.get("s") or "").strip().upper() == self.AUTH_SUCCESS:
             self.logger.info("Authentication successful")
         else:
             self.logger.error(f"Authentication failed: {data}")
+            self.auth_failed = True
+            self.auth_failure_message = str(data.get("emsg") or data.get("s") or "unknown reason")
+            # Flattrade does not proactively close the socket on auth rejection -
+            # it just sits open, silently rejected. Force the close ourselves so
+            # _on_close fires promptly and the adapter's reconnect logic engages
+            # instead of the connection hanging around with a dead session.
+            self._close_websocket()
 
         return True
 
+    # Conservative auth-failure indicators for the (less likely but possible)
+    # case Flattrade signals rejection via a raw error/close frame instead of
+    # the structured "ak" nack handled in _handle_auth_response. Kept tight to
+    # avoid false positives on transient network errors (we DO want to retry
+    # those). Matched case-insensitively against the str() of the payload.
+    _AUTH_FAILURE_INDICATORS = (
+        "401",
+        "403",
+        "unauthorized",
+        "forbidden",
+        "invalid session",
+        "invalid token",
+        "session expired",
+    )
+
+    def _is_fatal_auth_error(self, payload) -> bool:
+        """Return True iff the error payload looks like an auth failure."""
+        if payload is None:
+            return False
+        text = str(payload).lower()
+        return any(token in text for token in self._AUTH_FAILURE_INDICATORS)
+
+    @staticmethod
+    def _close_frame_status(error) -> int | None:
+        """Return the RFC 6455 status code when `error` is a close frame.
+
+        websocket-client routes a server-initiated close through on_error, not
+        on_close: _app.py's read() sees OPCODE_CLOSE and calls closed(frame),
+        which passes the raw ABNF straight to handleDisconnect ->
+        _callback(on_error, frame). handleDisconnect then calls teardown() with
+        no argument, so _get_close_args gets close_frame=None and on_close
+        receives (None, None) — the status code is dropped on the floor.
+
+        That is why an orderly hangup used to surface as
+        "ERROR ... WebSocket error: fin=1 opcode=8 data=b'\\x03\\xe8'" followed
+        by "WebSocket closed: None - None". Recover the code here so the caller
+        can tell a deliberate server-side close from a real fault.
+        """
+        if not isinstance(error, websocket.ABNF):
+            return None
+        if error.opcode != websocket.ABNF.OPCODE_CLOSE:
+            return None
+        data = error.data or b""
+        if len(data) < 2:
+            # RFC 6455 permits a close frame with no status code. It is still a
+            # close, so the caller must route it to on_close - hence the
+            # separate _is_close_frame() predicate; only the CODE is unknown.
+            return None
+        return (data[0] << 8) | data[1]
+
+    @staticmethod
+    def _is_close_frame(error) -> bool:
+        """True for any close frame, with or without a status code."""
+        return (
+            isinstance(error, websocket.ABNF)
+            and error.opcode == websocket.ABNF.OPCODE_CLOSE
+        )
+
     def _on_error(self, ws, error) -> None:
         """Handle WebSocket connection errors"""
+        if self._is_close_frame(error):
+            status = self._close_frame_status(error)
+            # A close handshake, not a fault. Stash the decoded code for
+            # _on_close (websocket-client is about to call it with (None, None))
+            # rather than invoking _on_close here — teardown must run exactly
+            # once, or _stop_heartbeat() pays its join timeout twice.
+            reason = (error.data or b"")[2:].decode("utf-8", errors="replace")
+            self._pending_close_status = (status, reason or None)
+
+            # A close whose reason names an auth failure ("Invalid Session",
+            # 403, ...) must arm the adapter's bounded token-refresh path. The
+            # early return below would otherwise skip _is_fatal_auth_error and
+            # leave it on the generic reconnect loop, retrying a dead token.
+            if reason and not self.auth_failed and self._is_fatal_auth_error(reason):
+                self.auth_failed = True
+                self.auth_failure_message = reason
+                self.logger.error(
+                    f"Flattrade closed the socket with an auth failure: {reason}"
+                )
+                return
+
+            if status == 1000:
+                self.logger.warning(
+                    f"Flattrade closed the market-data socket cleanly (code {status} "
+                    "normal closure). PiConnect allows one session per uid/accesstoken, "
+                    "so this is normally the broker evicting us because another "
+                    f"connection authenticated with the same credentials.{f' Reason: {reason}' if reason else ''}"
+                )
+            elif status is None:
+                self.logger.warning(
+                    "Flattrade closed the market-data socket with no status code"
+                    f"{f' ({reason})' if reason else ''}"
+                )
+            else:
+                self.logger.error(
+                    f"Flattrade closed the market-data socket: code {status}"
+                    f"{f' ({reason})' if reason else ''}"
+                )
+            return
+
         self.logger.error(f"WebSocket error: {error}")
+        if not self.auth_failed and self._is_fatal_auth_error(error):
+            self.auth_failed = True
+            self.auth_failure_message = str(error)
         self._call_external_callback(self.on_error, ws, error)
 
     def _on_close(self, ws, close_status_code: int | None, close_msg: str | None) -> None:
         """Handle WebSocket connection close event"""
         self.connected = False
+
+        # websocket-client drops the status code when the peer initiates the
+        # close (see _close_frame_status); recover what _on_error decoded so the
+        # log and the external callback both see the real code instead of None.
+        pending = self._pending_close_status
+        self._pending_close_status = None
+        if close_status_code is None and pending is not None:
+            close_status_code, close_msg = pending
+
         self.logger.info(f"WebSocket closed: {close_status_code} - {close_msg}")
 
         self._stop_heartbeat()
@@ -323,16 +479,21 @@ class FlattradeWebSocket:
             self._heartbeat_thread.join(timeout=self.HEARTBEAT_JOIN_TIMEOUT)
             if self._heartbeat_thread.is_alive():
                 self.logger.warning("Heartbeat thread did not terminate within timeout")
-                # Don't clear reference - thread still running, could cause duplicate heartbeats
-                return
-        # Only clear reference if thread actually stopped
+                # Safe to clear the reference even if the join timed out: the
+                # thread is daemon=True so it cannot block process exit, and
+                # _start_heartbeat() overwrites this attribute with a brand-new
+                # thread object on the next connect regardless. With the
+                # _stop_event fix below, the join should reliably complete
+                # near-instantly in practice anyway.
+        # Clear reference unconditionally - see comment above
         self._heartbeat_thread = None
 
     def _heartbeat_worker(self) -> None:
         """Heartbeat worker thread - sends periodic heartbeats and monitors connection"""
         while self.running and self.connected:
             try:
-                time.sleep(self.HEARTBEAT_INTERVAL)
+                if self._stop_event.wait(self.HEARTBEAT_INTERVAL):
+                    break
 
                 if self.running and self.connected:
                     if not self._send_heartbeat():

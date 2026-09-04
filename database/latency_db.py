@@ -88,6 +88,16 @@ class OrderLatency(LatencyBase):
     ):
         """Log order execution latency"""
         try:
+            # The error column is a String, but callers may hand us a non-string
+            # payload — e.g. a failed request's response "message" can be a
+            # marshmallow validation-errors dict ({'symbol': ['Missing data...']}).
+            # SQLite cannot bind a dict/list to a text column, so coerce any
+            # non-string error to str and bound it to the column width.
+            if error is not None and not isinstance(error, str):
+                error = str(error)
+            if isinstance(error, str) and len(error) > 500:
+                error = error[:500]
+
             log = OrderLatency(
                 order_id=order_id,
                 user_id=user_id,
@@ -312,7 +322,9 @@ def purge_old_data_logs(days=7):
     Purge non-order endpoint latency logs older than specified days.
     Order execution logs (PLACE, SMART, MODIFY, CANCEL, etc.) are kept forever.
     """
-    # Order types to keep forever
+    # Order types to keep forever. Must stay in step with the set in
+    # utils.latency_monitor: a type present there but missing here is purged
+    # after a week despite being an order.
     ORDER_TYPES = {
         "PLACE",
         "SMART",
@@ -324,6 +336,9 @@ def purge_old_data_logs(days=7):
         "SPLIT",
         "OPTIONS",
         "OPTIONS_MULTI",
+        "GTT_PLACE",
+        "GTT_MODIFY",
+        "GTT_CANCEL",
     }
 
     try:

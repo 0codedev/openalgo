@@ -1,6 +1,6 @@
 import { BarChart3, BookOpen, LogOut, Menu, Moon, Sun, Zap } from 'lucide-react'
 import { useState } from 'react'
-import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router'
 import { authApi } from '@/api/auth'
 import { LogoutConfirmDialog } from '@/components/auth/LogoutConfirmDialog'
 import { Badge } from '@/components/ui/badge'
@@ -27,7 +27,21 @@ import { useAuthStore } from '@/stores/authStore'
 import { useThemeStore } from '@/stores/themeStore'
 import { showToast } from '@/utils/toast'
 
-export function Navbar() {
+interface NavbarProps {
+  /**
+   * Span the full viewport instead of the centred, width-capped container.
+   *
+   * Pages rendered inside Layout share its `container mx-auto`, so the nav
+   * lines up with the content below it and this stays false. Full-bleed pages
+   * under FullWidthLayout render this navbar themselves and have no such
+   * container, so a capped nav floats inset above edge-to-edge content -- on a
+   * 1920px screen Tailwind caps `container` at 1536px, leaving ~192px of gutter
+   * each side while the page fills the width.
+   */
+  fluid?: boolean
+}
+
+export function Navbar({ fluid = false }: NavbarProps = {}) {
   const location = useLocation()
   const navigate = useNavigate()
   const [mobileOpen, setMobileOpen] = useState(false)
@@ -73,7 +87,12 @@ export function Navbar() {
 
   return (
     <nav className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div className="container mx-auto px-4 flex h-14 items-center">
+      <div
+        className={cn(
+          'px-4 flex h-14 items-center',
+          fluid ? 'w-full' : 'container mx-auto'
+        )}
+      >
         {/* Mobile Menu */}
         <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
           <SheetTrigger asChild className="md:hidden">
@@ -103,22 +122,42 @@ export function Navbar() {
                 <div className="px-3 py-2 text-xs font-medium text-muted-foreground uppercase tracking-wider">
                   Navigation
                 </div>
-                {mobileSheetItems.map((item) => (
-                  <Link
-                    key={item.href}
-                    to={item.href}
-                    onClick={() => setMobileOpen(false)}
-                    className={cn(
-                      'flex items-center gap-3 rounded-lg px-3 py-3 text-sm transition-colors min-h-[44px] touch-manipulation',
-                      isActive(item.href)
-                        ? 'bg-primary text-primary-foreground'
-                        : 'hover:bg-muted active:bg-muted'
-                    )}
-                  >
-                    <item.icon className="h-4 w-4" />
-                    {item.label}
-                  </Link>
-                ))}
+                {mobileSheetItems.map((item) => {
+                  const active = isActive(item.href)
+                  const cls = cn(
+                    'flex items-center gap-3 rounded-lg px-3 py-3 text-sm transition-colors min-h-[44px] touch-manipulation',
+                    active
+                      ? 'bg-primary text-primary-foreground'
+                      : 'hover:bg-muted active:bg-muted'
+                  )
+                  const inner = (
+                    <>
+                      <item.icon className="h-4 w-4" />
+                      {item.label}
+                    </>
+                  )
+                  return item.external ? (
+                    <a
+                      key={item.href}
+                      href={item.href}
+                      onClick={() => setMobileOpen(false)}
+                      className={cls}
+                      aria-current={active ? 'page' : undefined}
+                    >
+                      {inner}
+                    </a>
+                  ) : (
+                    <Link
+                      key={item.href}
+                      to={item.href}
+                      onClick={() => setMobileOpen(false)}
+                      className={cls}
+                      aria-current={active ? 'page' : undefined}
+                    >
+                      {inner}
+                    </Link>
+                  )
+                })}
               </nav>
 
               {/* Profile menu items for mobile access */}
@@ -126,22 +165,26 @@ export function Navbar() {
                 <div className="px-3 py-2 text-xs font-medium text-muted-foreground uppercase tracking-wider">
                   Quick Access
                 </div>
-                {filteredProfileMenuItems.map((item) => (
-                  <Link
-                    key={item.href}
-                    to={item.href}
-                    onClick={() => setMobileOpen(false)}
-                    className={cn(
-                      'flex items-center gap-3 rounded-lg px-3 py-3 text-sm transition-colors min-h-[44px] touch-manipulation',
-                      isActive(item.href)
-                        ? 'bg-primary text-primary-foreground'
-                        : 'hover:bg-muted active:bg-muted'
-                    )}
-                  >
-                    <item.icon className="h-4 w-4" />
-                    {item.label}
-                  </Link>
-                ))}
+                {filteredProfileMenuItems.map((item) => {
+                  const active = isActive(item.href)
+                  return (
+                    <Link
+                      key={item.href}
+                      to={item.href}
+                      onClick={() => setMobileOpen(false)}
+                      className={cn(
+                        'flex items-center gap-3 rounded-lg px-3 py-3 text-sm transition-colors min-h-[44px] touch-manipulation',
+                        active
+                          ? 'bg-primary text-primary-foreground'
+                          : 'hover:bg-muted active:bg-muted'
+                      )}
+                      aria-current={active ? 'page' : undefined}
+                    >
+                      <item.icon className="h-4 w-4" />
+                      {item.label}
+                    </Link>
+                  )
+                })}
                 <a
                   href="https://docs.openalgo.in"
                   target="_blank"
@@ -168,22 +211,44 @@ export function Navbar() {
             and small laptops (768-1280px wide) without squashing or pushing
             the profile menu off-screen; full labels from xl up (issue #1384). */}
         <nav className="hidden md:flex items-center gap-1">
-          {navItems.map((item) => (
-            <Link
-              key={item.href}
-              to={item.href}
-              title={item.label}
-              className={cn(
-                'flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors',
-                isActive(item.href)
-                  ? 'bg-primary text-primary-foreground'
-                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-              )}
-            >
-              <item.icon className="h-4 w-4 shrink-0" />
-              <span className="hidden xl:inline">{item.label}</span>
-            </Link>
-          ))}
+          {navItems.map((item) => {
+            const active = isActive(item.href)
+            const className = cn(
+              'flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors',
+              active
+                ? 'bg-primary text-primary-foreground'
+                : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+            )
+            const content = (
+              <>
+                <item.icon className="h-4 w-4 shrink-0" />
+                <span className="hidden xl:inline">{item.label}</span>
+              </>
+            )
+            // Flask-served pages (e.g. /trading) need a full page load,
+            // not client-side routing.
+            return item.external ? (
+              <a
+                key={item.href}
+                href={item.href}
+                title={item.label}
+                className={className}
+                aria-current={active ? 'page' : undefined}
+              >
+                {content}
+              </a>
+            ) : (
+              <Link
+                key={item.href}
+                to={item.href}
+                title={item.label}
+                className={className}
+                aria-current={active ? 'page' : undefined}
+              >
+                {content}
+              </Link>
+            )
+          })}
         </nav>
 
         {/* Right Side */}
@@ -257,16 +322,25 @@ export function Navbar() {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56">
-              {filteredProfileMenuItems.map((item) => (
-                <DropdownMenuItem
-                  key={item.href}
-                  onSelect={() => navigate(item.href)}
-                  className="cursor-pointer"
-                >
-                  <item.icon className="h-4 w-4 mr-2" />
-                  {item.label}
-                </DropdownMenuItem>
-              ))}
+              {filteredProfileMenuItems.map((item) =>
+                item.external ? (
+                  <DropdownMenuItem key={item.href} asChild className="cursor-pointer">
+                    <a href={item.href} className="flex items-center">
+                      <item.icon className="h-4 w-4 mr-2" />
+                      {item.label}
+                    </a>
+                  </DropdownMenuItem>
+                ) : (
+                  <DropdownMenuItem
+                    key={item.href}
+                    onSelect={() => navigate(item.href)}
+                    className="cursor-pointer"
+                  >
+                    <item.icon className="h-4 w-4 mr-2" />
+                    {item.label}
+                  </DropdownMenuItem>
+                )
+              )}
               <DropdownMenuItem asChild>
                 <a
                   href="https://docs.openalgo.in"

@@ -125,15 +125,6 @@ def should_download_master_contract(broker):
     if download_date != today_tz:
         return True, f"Last download was on {download_date} {tz_label}, today is {today_tz}"
 
-    # Same calendar day — check if we are currently before the cutoff time
-    current_time_minutes = now_tz.hour * 60 + now_tz.minute
-    if current_time_minutes < cutoff_time_minutes:
-        return (
-            False,
-            f"Already downloaded today at {last_download_tz.strftime('%H:%M')} {tz_label} "
-            f"and we are still before the {cutoff_hour:02d}:{cutoff_minute:02d} cutoff today.",
-        )
-
     # Same calendar day — use cache if downloaded after cutoff, otherwise re-download
     if download_time_minutes >= cutoff_time_minutes:
         return (
@@ -303,6 +294,17 @@ def async_master_contract_download(broker):
     # Use the dynamically imported module's master_contract_download function
     try:
         master_contract_status = master_contract_module.master_contract_download()
+
+        # Brokers disagree on what `name` holds for a derivative row - the
+        # underlying root, or the contract description. Every lookup that
+        # resolves an underlying wants the root, so settle it here, on the one
+        # path all 35+ brokers share, before anything reads the table.
+        try:
+            from database.symbol import normalize_derivative_underlyings
+
+            normalize_derivative_underlyings()
+        except Exception as normalize_error:
+            logger.exception(f"Could not normalize derivative underlyings: {normalize_error}")
 
         # Most brokers return the socketio.emit result, we need to check completion
         # by looking at the module's actual completion

@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import secrets
@@ -5,6 +6,7 @@ from datetime import UTC, datetime
 
 from flask import (
     Blueprint,
+    abort,
     current_app,
     flash,
     jsonify,
@@ -28,6 +30,7 @@ from database.user_db import (  # Import the function
 )
 from extensions import socketio
 from limiter import limiter  # Import the limiter instance
+from utils.config import build_external_url
 from utils.email_debug import debug_smtp_connection
 from utils.email_utils import send_password_reset_email, send_test_email
 from utils.ip_helper import get_real_ip
@@ -45,89 +48,26 @@ RESET_RATE_LIMIT = os.getenv("RESET_RATE_LIMIT", "15 per hour")  # Password rese
 auth_bp = Blueprint("auth", __name__, url_prefix="/auth")
 
 
-@auth_bp.route("/mock-upstox-login")
-def mock_upstox_login():
-    session["logged_in"] = True
-    session["broker"] = "upstox"
-    session["user"] = "admin"
-    
-    # Set login time in session to pass is_session_valid() checks
-    import pytz
-    now_utc = datetime.now(pytz.timezone("UTC"))
-    now_ist = now_utc.astimezone(pytz.timezone("Asia/Kolkata"))
-    session["login_time"] = now_ist.isoformat()
-    
-    session_id = secrets.token_hex(32)
-    session["session_id"] = session_id
-    
-    # 1. Parse Wealth Dashboard's .env to retrieve the 1-year UPSTOX_ANALYTICS_TOKEN
-    upstox_token = None
-    dashboard_env = r"c:\Users\gadda\Desktop\Projects\1. Wealth Dashboard v2\.env"
-    if os.path.exists(dashboard_env):
-        try:
-            with open(dashboard_env, "r", encoding="utf-8") as f:
-                for line in f:
-                    if line.startswith("UPSTOX_ANALYTICS_TOKEN="):
-                        val = line.split("=", 1)[1].strip()
-                        if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
-                            val = val[1:-1]
-                        upstox_token = val
-                        break
-        except Exception as e:
-            logger.error(f"Error reading dashboard .env file: {e}")
-            
-    # Fallback default if dashboard env is unreadable
-    if not upstox_token:
-        upstox_token = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI1UkNLUkgiLCJqdGkiOiI2YTE0NmZhOTNiYzlkNjI1NzhlNTg4OWUiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaXNFeHRlbmRlZCI6dHJ1ZSwiaWF0IjoxNzc5NzI0MjAxLCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOjE4MTEyODI0MDB9.kpGivy15HKR4Oov_MABM-CySHigOW_n-ES4mI3H1pSE"
-        
-    # 2. Seed/Upsert the decrypted auth token in the database to restore UPSTOX configuration
-    from database.auth_db import upsert_auth, register_session, auth_cache, feed_token_cache, broker_cache
-    try:
-        upsert_auth(
-            name="admin",
-            auth_token=upstox_token,
-            broker="upstox",
-            feed_token=None,
-            user_id="admin",
-            revoke=False
-        )
-        # Clear local memory caches to ensure OpenAlgo fetches the newly seeded token
-        auth_cache.clear()
-        feed_token_cache.clear()
-        broker_cache.clear()
-    except Exception as e:
-        logger.exception(f"Error upserting admin auth token during mock login: {e}")
-        
-    # 3. Smart download check: Auto-download or load cached Upstox master contracts daily in the background
-    from threading import Thread
-    from utils.auth_utils import (
-        should_download_master_contract,
-        async_master_contract_download,
-        load_existing_master_contract,
-        init_broker_status
-    )
-    try:
-        init_broker_status("upstox")
-        should_download, reason = should_download_master_contract("upstox")
-        logger.info(f"[Mock Login] Smart master contract check: should_download={should_download}, reason={reason}")
-        if should_download:
-            thread = Thread(target=async_master_contract_download, args=("upstox",), daemon=True)
-            thread.start()
-        else:
-            thread = Thread(target=load_existing_master_contract, args=("upstox",), daemon=True)
-            thread.start()
-    except Exception as e:
-        logger.exception(f"Error initiating master contract download in mock login: {e}")
-        
-    register_session(
-        username="admin",
-        session_id=session_id,
-        device_info="Mock Login Bypass",
-        ip_address="127.0.0.1",
-        broker="upstox"
-    )
-    
-    return redirect("/dashboard")
+def _hash_reset_token(token: str) -> str:
+    """
+    Hash a password-reset token for storage in the session.
+
+    Flask's default session is a signed - not encrypted - cookie, so anything
+    put in it is readable by whoever holds the cookie. Storing the raw reset
+    token there means the caller who *requested* the reset can read it straight
+    back out of their own cookie, without ever seeing the email it was sent to.
+    Since the reset endpoint is unauthenticated by necessity, that caller may be
+    an attacker who supplied someone else's address. Keeping only the hash means
+    the raw token exists solely in the email (or the TOTP response, which is
+    handed to a user who has already proven possession of the authenticator).
+
+    Args:
+        token: The raw reset token.
+
+    Returns:
+        str: Hex-encoded SHA-256 digest of the token.
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def _utcnow_iso() -> str:
@@ -380,6 +320,26 @@ def login():
 
         if authenticate_user(username, password):
             logger.info(f"[LOGIN] Password auth success for: {username}")
+            # Start every authenticated session from a clean slate.
+            #
+            # This runs after the password check but BEFORE any authenticated
+            # value is written: session["user"] is set immediately below, and
+            # "logged_in" is not set until broker auth completes in
+            # handle_auth_success(). So nothing authenticated is discarded here.
+            #
+            # This is state hygiene, not a session-fixation fix. Flask signs the
+            # whole session into the cookie (SecureCookieSessionInterface), so
+            # there is no server-side session id an attacker could pre-plant and
+            # later reuse. What it does prevent is leftovers from an abandoned
+            # earlier flow surviving into the authenticated session: a
+            # password-reset token, a stale broker key, or a half-finished TOTP
+            # park being layered under the new values instead of replaced.
+            #
+            # Safe for CSRF: POST /auth/login is exempt (no session exists yet)
+            # and the frontend re-fetches a token from /auth/csrf-token before
+            # each mutating request. session.permanent is set in
+            # handle_auth_success() once broker auth succeeds.
+            session.clear()
 
             # If the user has 2FA enabled for login, defer setting session["user"]
             # until TOTP is verified. This is the gate that prevents an attacker
@@ -682,11 +642,16 @@ def reset_password():
             try:
                 # Generate a secure token for the email reset
                 token = secrets.token_urlsafe(32)
-                session["reset_token"] = token
+                session["reset_token"] = _hash_reset_token(token)
                 session["reset_email"] = email
 
-                # Create reset link
-                reset_link = url_for("auth.reset_password_email", token=token, _external=True)
+                # Create reset link. Built from HOST_SERVER rather than
+                # url_for(_external=True) so a poisoned Host header cannot
+                # redirect the emailed link - and the token in it - to an
+                # attacker-controlled origin.
+                reset_link = build_external_url(
+                    url_for("auth.reset_password_email", token=token)
+                )
                 send_password_reset_email(email, reset_link, user.username)
                 logger.info(f"Password reset email sent to {email}")
 
@@ -713,7 +678,7 @@ def reset_password():
         if user and user.verify_totp(totp_code):
             # Generate a secure token for the password reset
             token = secrets.token_urlsafe(32)
-            session["reset_token"] = token
+            session["reset_token"] = _hash_reset_token(token)
             session["reset_email"] = email
 
             return jsonify({"status": "success", "message": "TOTP verified", "token": token})
@@ -730,9 +695,13 @@ def reset_password():
             token = request.form.get("token")
             password = request.form.get("password")
 
-        # Verify token from session (handles both TOTP and email reset tokens)
-        valid_token = token == session.get("reset_token") or token == session.get(
-            "email_reset_token"
+        # Verify token against the hashes held in the session (handles both TOTP
+        # and email reset tokens). Constant-time comparison, and a missing
+        # session entry never counts as a match.
+        submitted = _hash_reset_token(token) if token else ""
+        valid_token = any(
+            stored and secrets.compare_digest(submitted, stored)
+            for stored in (session.get("reset_token"), session.get("email_reset_token"))
         )
         if not valid_token or email != session.get("reset_email"):
             return jsonify({"status": "error", "message": "Invalid or expired reset token."}), 400
@@ -784,8 +753,12 @@ def reset_password_email(token):
             flash("Invalid reset link.", "error")
             return redirect("/reset-password?error=invalid_link")
 
-        # Check if this token was issued (stored in session during email send)
-        if token != session.get("reset_token"):
+        # Check if this token was issued (its hash is stored in session during
+        # email send)
+        stored_token = session.get("reset_token")
+        if not stored_token or not secrets.compare_digest(
+            _hash_reset_token(token), stored_token
+        ):
             flash("Invalid or expired reset link.", "error")
             return redirect("/reset-password?error=expired_link")
 
@@ -796,7 +769,7 @@ def reset_password_email(token):
             return redirect("/reset-password?error=session_expired")
 
         # Set up session for password reset (email verification counts as verified)
-        session["email_reset_token"] = token
+        session["email_reset_token"] = _hash_reset_token(token)
 
         # Redirect to React password reset page with token and email in URL
         # React will read these and show the password form
@@ -1310,11 +1283,51 @@ def get_dashboard_data():
         return jsonify({"status": "error", "message": "Internal server error"}), 500
 
 
+def _is_foreign_initiated() -> bool:
+    """True when the request was initiated by a page we do not serve.
+
+    Logout is far more than "destroy a cookie" here: it revokes the broker
+    token, publishes CACHE_INVALIDATE_ALL (tearing down the shared WebSocket
+    feed), clears every device's session and flushes the symbol cache. That
+    makes a forced logout a real availability attack on a live trading session,
+    so it must not be reachable from someone else's page.
+
+    Flask-WTF never CSRF-validates GET, and SESSION_COOKIE_SAMESITE="Lax" still
+    attaches the session cookie to top-level cross-site navigations, so a plain
+    link is enough without this check. Fetch metadata is the signal that covers
+    it. "same-site" is rejected too: OpenAlgo is a single self-hosted origin, so
+    a same-site-but-not-same-origin caller is another app sharing the host -
+    ports are not part of the same-site check, which is exactly the situation on
+    a developer or self-hosted box running several services on localhost.
+
+    A missing header is treated as trusted. Mounting this attack requires a
+    browser (the victim's cookie has to be attached automatically), and every
+    browser new enough to do that sends Sec-Fetch-Site; a client old enough to
+    omit it is not carrying the cookie either.
+    """
+    site = request.headers.get("Sec-Fetch-Site")
+    return site is not None and site not in ("same-origin", "none")
+
+
 @auth_bp.route("/logout", methods=["GET", "POST"])
 def logout():
-    if session.get("logged_in"):
-        username = session["user"]
+    # Checked before anything is torn down, so a rejected request leaves the
+    # session exactly as it was rather than logging the victim out.
+    if _is_foreign_initiated():
+        logger.warning(
+            f"Rejected cross-origin logout from IP={get_real_ip()} "
+            f"Sec-Fetch-Site={request.headers.get('Sec-Fetch-Site')}"
+        )
+        abort(403)
 
+    was_logged_in = bool(session.get("logged_in"))
+    username = session.get("user")
+
+    # Wipe the browser session before teardown so a revocation or notification
+    # failure cannot leave the user stuck in a half-logged-in state.
+    session.clear()
+
+    if was_logged_in and username:
         # Clear cache entries before database update to prevent stale data access
         cache_key_auth = f"auth-{username}"
         cache_key_feed = f"feed-{username}"
@@ -1358,7 +1371,6 @@ def logout():
         })
 
         # Clear entire session to ensure complete logout
-        session.clear()
         logger.info(f"Session cleared for user: {username}")
 
     # For POST requests (AJAX from React), return JSON

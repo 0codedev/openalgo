@@ -7,7 +7,6 @@ import {
   Settings2,
   TrendingDown,
   TrendingUp,
-  ExternalLink,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { tradingApi } from '@/api/trading'
@@ -98,18 +97,6 @@ function formatTime(timestamp: string): string {
     second: '2-digit',
   })
 }
-
-const openTradingView = (symbol: string) => {
-  if (!symbol) return;
-  let cleanSymbol = symbol.trim().toUpperCase();
-  const optionMatch = cleanSymbol.match(/^([A-Z\-]+)\d{2}[A-Z]{3}\d+(?:CE|PE)$/i);
-  if (optionMatch && optionMatch[1]) {
-    cleanSymbol = optionMatch[1];
-  }
-  cleanSymbol = cleanSymbol.replace('NSE:', '').replace('BSE:', '').replace('NFO:', '');
-  const url = `https://www.tradingview.com/chart/?symbol=NSE:${cleanSymbol}`;
-  window.open(url, '_blank');
-};
 
 export default function TradeBook() {
   const { apiKey, user } = useAuthStore()
@@ -559,17 +546,8 @@ export default function TradeBook() {
                 </TableHeader>
                 <TableBody>
                   {sortedAndFilteredTrades.map((trade, index) => (
-                    <TableRow key={`${trade.orderid}-${index}`} className="group">
-                      <TableCell className="font-medium">
-                        <button
-                          onClick={() => openTradingView(trade.symbol)}
-                          className="hover:text-indigo-500 font-medium transition-colors flex items-center gap-1.5 text-left"
-                          title="Open in TradingView"
-                        >
-                          {trade.symbol}
-                          <ExternalLink size={12} className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground" />
-                        </button>
-                      </TableCell>
+                    <TableRow key={`${trade.orderid}-${index}`}>
+                      <TableCell className="font-medium">{trade.symbol}</TableCell>
                       <TableCell>
                         <Badge variant="outline">{trade.exchange}</Badge>
                       </TableCell>
