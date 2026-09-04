@@ -280,6 +280,27 @@ def catch_up_daily_pnl_snapshot():
                 logger.debug(f"Catch-up: Yesterday's snapshot already exists for user {user_id}")
                 continue
 
+            # Check if there was any trading activity or open positions yesterday
+            yesterday_start = datetime.combine(yesterday, datetime.min.time())
+            yesterday_end = datetime.combine(yesterday, datetime.max.time())
+            
+            from database.sandbox_db import SandboxTrades
+            trade_count = SandboxTrades.query.filter(
+                SandboxTrades.user_id == user_id,
+                SandboxTrades.trade_timestamp >= yesterday_start,
+                SandboxTrades.trade_timestamp <= yesterday_end
+            ).count()
+
+            open_positions_count = SandboxPositions.query.filter(
+                SandboxPositions.user_id == user_id,
+                SandboxPositions.quantity != 0
+            ).count()
+
+            # Only create a snapshot if there was trading activity or if there are open positions
+            if trade_count == 0 and open_positions_count == 0:
+                logger.debug(f"Catch-up: Skipping snapshot for user {user_id} on {yesterday} (no trades or open positions)")
+                continue
+
             # Calculate yesterday's P&L from available data
             # Since we don't have exact yesterday's values, use what we can reconstruct:
             # - All-time realized - today's realized = yesterday's (approximate)

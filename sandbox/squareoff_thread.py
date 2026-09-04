@@ -177,6 +177,7 @@ def _schedule_square_off_jobs(scheduler):
                     SandboxFunds,
                     SandboxHoldings,
                     SandboxPositions,
+                    SandboxTrades,
                     db_session,
                 )
 
@@ -219,6 +220,21 @@ def _schedule_square_off_jobs(scheduler):
 
                     # Get today's realized P&L
                     realized_pnl = Decimal(str(funds.today_realized_pnl or 0))
+
+                    # Check if there was any trading activity today
+                    today_start = datetime.combine(today, datetime.min.time())
+                    today_end = datetime.combine(today, datetime.max.time())
+                    
+                    trade_count = SandboxTrades.query.filter(
+                        SandboxTrades.user_id == user_id,
+                        SandboxTrades.trade_timestamp >= today_start,
+                        SandboxTrades.trade_timestamp <= today_end
+                    ).count()
+
+                    # Only create a snapshot if there are active positions, active holdings, today's realized P&L, or trades today
+                    if len(positions) == 0 and len(holdings) == 0 and realized_pnl == 0 and trade_count == 0:
+                        logger.debug(f"Skipping daily snapshot for user {user_id} on {today} (no trades, open positions, or holdings)")
+                        continue
 
                     # Total MTM = Realized + Unrealized (positions + holdings)
                     total_unrealized = positions_unrealized + holdings_unrealized

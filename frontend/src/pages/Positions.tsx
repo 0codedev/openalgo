@@ -13,6 +13,7 @@ import {
   TrendingDown,
   TrendingUp,
   X,
+  ExternalLink,
 } from 'lucide-react'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { tradingApi } from '@/api/trading'
@@ -143,6 +144,18 @@ const PRODUCT_COLORS: Record<string, string> = {
   MIS: 'bg-cyan-500/20 text-cyan-600 border-cyan-500/30',
   NRML: 'bg-slate-500/20 text-slate-600 border-slate-500/30',
 }
+
+const openTradingView = (symbol: string) => {
+  if (!symbol) return;
+  let cleanSymbol = symbol.trim().toUpperCase();
+  const optionMatch = cleanSymbol.match(/^([A-Z\-]+)\d{2}[A-Z]{3}\d+(?:CE|PE)$/i);
+  if (optionMatch && optionMatch[1]) {
+    cleanSymbol = optionMatch[1];
+  }
+  cleanSymbol = cleanSymbol.replace('NSE:', '').replace('BSE:', '').replace('NFO:', '');
+  const url = `https://www.tradingview.com/chart/?symbol=NSE:${cleanSymbol}`;
+  window.open(url, '_blank');
+};
 
 export default function Positions() {
   const { apiKey, user } = useAuthStore()
@@ -948,9 +961,16 @@ export default function Positions() {
                         {/* Position Rows */}
                         {!isCollapsed &&
                           groupPositions.map((position, index) => (
-                            <TableRow key={`${position.symbol}-${position.exchange}-${index}`}>
+                            <TableRow key={`${position.symbol}-${position.exchange}-${index}`} className="group">
                               <TableCell className="w-[140px] font-medium">
-                                {position.symbol}
+                                <button
+                                  onClick={() => openTradingView(position.symbol)}
+                                  className="hover:text-indigo-500 font-medium transition-colors flex items-center gap-1.5 text-left"
+                                  title="Open in TradingView"
+                                >
+                                  {position.symbol}
+                                  <ExternalLink size={12} className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground" />
+                                </button>
                               </TableCell>
                               <TableCell className="w-[80px]">
                                 <Badge

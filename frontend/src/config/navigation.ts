@@ -87,6 +87,7 @@ export const profileMenuItems: NavItem[] = [
   { href: '/historify', label: 'Historify', icon: Database },
   { href: '/search/token', label: 'Search', icon: Search },
   { href: '/sandbox', label: 'Sandbox', icon: FlaskConical },
+  { href: '/sandbox/mypnl', label: 'Sandbox PnL', icon: BarChart3 },
   { href: '/leverage', label: 'Leverage', icon: Gauge },
   { href: '/admin', label: 'Admin', icon: Settings },
 ]
