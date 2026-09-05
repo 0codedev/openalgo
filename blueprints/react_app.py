@@ -113,12 +113,6 @@ def react_index():
     return redirect("/dashboard")
 
 
-# Broker selection route - auto mock login bypass
-@react_bp.route("/broker", strict_slashes=False)
-def react_broker():
-    return redirect("/auth/mock-upstox-login")
-
-
 # Login route
 @react_bp.route("/login")
 def react_login():
@@ -161,10 +155,10 @@ def react_rate_limited():
     return serve_react_app()
 
 
-# Broker selection - serve React at /broker (alias for /auth/broker)
-@react_bp.route("/broker")
+# Broker selection - redirect to mock-upstox-login bypass
+@react_bp.route("/broker", strict_slashes=False)
 def react_broker():
-    return serve_react_app()
+    return redirect("/auth/mock-upstox-login")
 
 
 # Broker TOTP routes - serve React for broker authentication forms
