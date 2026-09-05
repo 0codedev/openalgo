@@ -1,0 +1,1 @@
+import{r as e}from"./rolldown-runtime-QTnfLwEv.js";import{f as t,h as n}from"./react-vendor-D9qDK4Zo.js";var r=e(n(),1);t();var i=r.createContext(void 0);function a(e){let t=r.useContext(i);return e||t||`ltr`}export{a as t};

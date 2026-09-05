@@ -1,0 +1,1 @@
+import{r as e}from"./rolldown-runtime-QTnfLwEv.js";import{n as t,t as n}from"./plotly.min-FpChDeDj.js";var r=e(t(),1),i=e(n(),1).default,a=r.default,o=(a.default??a)(i);export{o as default};
