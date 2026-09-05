@@ -7,7 +7,7 @@ import mimetypes
 import os
 from pathlib import Path
 
-from flask import Blueprint, abort, request, send_file, send_from_directory
+from flask import Blueprint, abort, redirect, request, send_file, send_from_directory, session
 
 react_bp = Blueprint("react", __name__)
 
@@ -105,10 +105,18 @@ npm run build</pre>
 # ============================================================
 
 
-# Index/Home route
+# Index/Home route - auto mock login for seamless access
 @react_bp.route("/")
 def react_index():
-    return serve_react_app()
+    if not session.get("logged_in") or not session.get("broker"):
+        return redirect("/auth/mock-upstox-login")
+    return redirect("/dashboard")
+
+
+# Broker selection route - auto mock login bypass
+@react_bp.route("/broker", strict_slashes=False)
+def react_broker():
+    return redirect("/auth/mock-upstox-login")
 
 
 # Login route
