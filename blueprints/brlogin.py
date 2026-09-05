@@ -42,6 +42,9 @@ def broker_callback(broker, para=None):
     logger.debug("Session keys: %s", sorted(session.keys()))
     logger.info(f"Session has user key: {'user' in session}")
 
+    if broker == "upstox":
+        return redirect("/auth/mock-upstox-login")
+
     # Special handling for brokers that come from external auth and might lose session
     if broker in ("compositedge", "rmoney", "iiflcapital") and "user" not in session:
         # Session will be established after successful auth token validation

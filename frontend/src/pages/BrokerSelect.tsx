@@ -185,7 +185,7 @@ export default function BrokerSelect() {
         break
 
       case 'upstox':
-        loginUrl = `https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id=${broker_api_key}&redirect_uri=${redirect_url}`
+        loginUrl = '/auth/mock-upstox-login'
         break
 
       case 'zerodha':

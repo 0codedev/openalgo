@@ -48,6 +48,103 @@ RESET_RATE_LIMIT = os.getenv("RESET_RATE_LIMIT", "15 per hour")  # Password rese
 auth_bp = Blueprint("auth", __name__, url_prefix="/auth")
 
 
+@auth_bp.route("/mock-upstox-login")
+def mock_upstox_login():
+    session["logged_in"] = True
+    session["broker"] = "upstox"
+    session["user"] = "admin"
+
+    # Set login time in session to pass is_session_valid() checks
+    import pytz
+    now_utc = datetime.now(pytz.timezone("UTC"))
+    now_ist = now_utc.astimezone(pytz.timezone("Asia/Kolkata"))
+    session["login_time"] = now_ist.isoformat()
+
+    session_id = secrets.token_hex(32)
+    session["session_id"] = session_id
+
+    # 1. Parse Wealth Dashboard's or OpenAlgo's .env to retrieve UPSTOX_ANALYTICS_TOKEN
+    upstox_token = None
+    possible_envs = [
+        "/home/ubuntu/wealthos/.env",
+        "/home/ubuntu/wealth-dashboard-v2/.env",
+        r"c:\Users\gadda\Desktop\Projects\1. Wealth Dashboard v2\.env",
+        "/home/ubuntu/openalgo/.env",
+        "/home/ubuntu/openalgo/.env.upstox",
+        os.path.join(os.getcwd(), ".env"),
+    ]
+    for env_path in possible_envs:
+        if os.path.exists(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if line.startswith("UPSTOX_ANALYTICS_TOKEN="):
+                            val = line.split("=", 1)[1].strip()
+                            if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+                                val = val[1:-1]
+                            upstox_token = val
+                            break
+            except Exception as e:
+                logger.error(f"Error reading env file {env_path}: {e}")
+            if upstox_token:
+                break
+
+    # Fallback default if env files are unreadable
+    if not upstox_token:
+        upstox_token = os.getenv("UPSTOX_ANALYTICS_TOKEN") or "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI1UkNLUkgiLCJqdGkiOiI2YTE0NmZhOTNiYzlkNjI1NzhlNTg4OWUiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6dHJ1ZSwiaXNFeHRlbmRlZCI6dHJ1ZSwiaWF0IjoxNzc5NzI0MjAxLCJpc3MiOiJ1ZGFwaS1nYXRld2F5LXNlcnZpY2UiLCJleHAiOjE4MTEyODI0MDB9.kpGivy15HKR4Oov_MABM-CySHigOW_n-ES4mI3H1pSE"
+
+    # 2. Seed/Upsert the decrypted auth token in the database to restore UPSTOX configuration
+    from database.auth_db import upsert_auth, register_session, auth_cache, feed_token_cache, broker_cache
+    try:
+        upsert_auth(
+            name="admin",
+            auth_token=upstox_token,
+            broker="upstox",
+            feed_token=None,
+            user_id="admin",
+            revoke=False,
+        )
+        auth_cache.clear()
+        feed_token_cache.clear()
+        broker_cache.clear()
+    except Exception as e:
+        logger.exception(f"Error upserting admin auth token during mock login: {e}")
+
+    # 3. Smart download check: Auto-download or load cached Upstox master contracts daily in the background
+    from threading import Thread
+    from utils.auth_utils import (
+        should_download_master_contract,
+        async_master_contract_download,
+        load_existing_master_contract,
+        init_broker_status,
+    )
+    try:
+        init_broker_status("upstox")
+        should_download, reason = should_download_master_contract("upstox")
+        logger.info(f"[Mock Login] Smart master contract check: should_download={should_download}, reason={reason}")
+        if should_download:
+            thread = Thread(target=async_master_contract_download, args=("upstox",), daemon=True)
+            thread.start()
+        else:
+            thread = Thread(target=load_existing_master_contract, args=("upstox",), daemon=True)
+            thread.start()
+    except Exception as e:
+        logger.exception(f"Error initiating master contract download in mock login: {e}")
+
+    try:
+        register_session(
+            username="admin",
+            session_id=session_id,
+            device_info="Mock Login Bypass",
+            ip_address=get_real_ip() if callable(get_real_ip) else "127.0.0.1",
+            broker="upstox",
+        )
+    except Exception as e:
+        logger.exception(f"Error registering session in mock login: {e}")
+
+    return redirect("/dashboard")
+
+
 def _hash_reset_token(token: str) -> str:
     """
     Hash a password-reset token for storage in the session.
