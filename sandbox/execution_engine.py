@@ -731,6 +731,7 @@ class ExecutionEngine:
                     pnl_percent=Decimal("0.00"),
                     accumulated_realized_pnl=Decimal("0.00"),
                     margin_blocked=order_margin,  # Store exact margin from order
+                    strategy=getattr(order, "strategy", None) or "",
                     created_at=datetime.now(pytz.timezone("Asia/Kolkata")),
                 )
                 db_session.add(position)
@@ -752,6 +753,7 @@ class ExecutionEngine:
                     position.ltp = execution_price
                     position.pnl = Decimal("0.00")  # Reset current P&L (will be updated by MTM)
                     position.pnl_percent = Decimal("0.00")
+                    position.strategy = getattr(order, "strategy", None) or position.strategy or ""
                     # accumulated_realized_pnl stays as is from previous closed trades
                     # today_realized_pnl: Keep current value (already reset at session boundary)
                     # Store the exact margin that was blocked at order placement time
@@ -826,6 +828,13 @@ class ExecutionEngine:
                     position.average_price = new_average_price
                     position.ltp = execution_price
 
+                    order_strategy = getattr(order, "strategy", None)
+                    if order_strategy:
+                        if not position.strategy:
+                            position.strategy = order_strategy
+                        elif order_strategy not in position.strategy.split(","):
+                            position.strategy = f"{position.strategy},{order_strategy}"
+
                     # Accumulate margin - add the margin blocked for this order to existing position margin
                     order_margin = (
                         order.margin_blocked
@@ -898,6 +907,7 @@ class ExecutionEngine:
                             remaining_quantity if order.action == "BUY" else -remaining_quantity
                         )
                         position.average_price = execution_price
+                        position.strategy = getattr(order, "strategy", None) or ""
 
                         # For reversed position, the new margin comes from the excess quantity in the order
                         # The old position's margin was fully released, new position gets fresh margin

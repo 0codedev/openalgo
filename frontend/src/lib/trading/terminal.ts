@@ -3614,6 +3614,7 @@ export class TradingTerminal {
     this.bookTimer = setInterval(() => this.pollBook(), 8000)
 
     // restore the last symbol; fall back to BHEL/NSE if it's gone or has no data.
+    if (this.sym) return
     let loaded = false
     try {
       const saved = JSON.parse(this.lsGet('symbol') || 'null') as {
@@ -3623,12 +3624,16 @@ export class TradingTerminal {
       if (saved?.symbol) {
         const rows = await this.search(saved.symbol, saved.exchange)
         const row = rows.find((r) => r.symbol === saved.symbol && r.exchange === saved.exchange)
-        if (row) loaded = await this.loadSymbol(row, { silent: true })
+        if (row) {
+          loaded = await this.loadSymbol(row, { silent: true })
+        } else if (saved.exchange) {
+          loaded = await this.loadSymbol({ symbol: saved.symbol, exchange: saved.exchange }, { silent: true })
+        }
       }
     } catch {
       /* fall through to the default */
     }
-    if (!loaded && !this.destroyed) {
+    if (!loaded && !this.sym && !this.destroyed) {
       try {
         const rows = await this.search('BHEL', 'NSE')
         const bhel = rows.find((r) => r.symbol === 'BHEL' && r.exchange === 'NSE')

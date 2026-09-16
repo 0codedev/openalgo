@@ -31,6 +31,7 @@ interface Position {
   symbol: string
   exchange: string
   product: string
+  strategy?: string
   quantity: number
   display_qty?: number
   capital_deployed?: number
@@ -86,15 +87,17 @@ function getPnLColor(value: number): string {
   return ''
 }
 
-const openTradingView = (symbol: string) => {
+const openChart = (symbol: string, exchange?: string) => {
   if (!symbol) return;
-  let cleanSymbol = symbol.trim().toUpperCase();
-  const optionMatch = cleanSymbol.match(/^([A-Z\-]+)\d{2}[A-Z]{3}\d+(?:CE|PE)$/i);
-  if (optionMatch && optionMatch[1]) {
-    cleanSymbol = optionMatch[1];
+  const cleanSymbol = symbol.trim().toUpperCase();
+  const isOption = /(?:CE|PE)$/i.test(cleanSymbol);
+  if (isOption) {
+    const ex = exchange || (cleanSymbol.includes('SENSEX') ? 'BFO' : 'NFO');
+    window.open(`/trading?symbol=${encodeURIComponent(cleanSymbol)}&exchange=${encodeURIComponent(ex)}`, '_blank');
+    return;
   }
-  cleanSymbol = cleanSymbol.replace('NSE:', '').replace('BSE:', '').replace('NFO:', '');
-  const url = `https://www.tradingview.com/chart/?symbol=NSE:${cleanSymbol}`;
+  const stockSymbol = cleanSymbol.replace('NSE:', '').replace('BSE:', '').replace('NFO:', '');
+  const url = `https://www.tradingview.com/chart/?symbol=NSE:${stockSymbol}`;
   window.open(url, '_blank');
 };
 
@@ -393,6 +396,7 @@ export default function SandboxPnL() {
                         <TableHead>Symbol</TableHead>
                         <TableHead>Exchange</TableHead>
                         <TableHead>Product</TableHead>
+                        <TableHead>Strategy</TableHead>
                         <TableHead className="text-right">Qty</TableHead>
                         <TableHead className="text-right">Avg Price</TableHead>
                         <TableHead className="text-right">Capital Deployed</TableHead>
@@ -408,9 +412,9 @@ export default function SandboxPnL() {
                         <TableRow key={index}>
                           <TableCell className="font-semibold">
                             <button
-                              onClick={() => openTradingView(pos.symbol)}
+                              onClick={() => openChart(pos.symbol, pos.exchange)}
                               className="hover:text-primary transition-colors flex items-center gap-1.5 text-left font-semibold"
-                              title="Open chart in TradingView"
+                              title="Open Chart"
                             >
                               {pos.symbol}
                               <ExternalLink className="h-3.5 w-3.5 opacity-60" />
@@ -431,6 +435,19 @@ export default function SandboxPnL() {
                             >
                               {pos.product}
                             </Badge>
+                          </TableCell>
+                          <TableCell>
+                            {pos.strategy ? (
+                              <Badge
+                                variant="secondary"
+                                className="font-mono text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 max-w-[130px] truncate"
+                                title={pos.strategy}
+                              >
+                                {pos.strategy}
+                              </Badge>
+                            ) : (
+                              <span className="text-muted-foreground text-xs">-</span>
+                            )}
                           </TableCell>
                           <TableCell className="text-right">{pos.display_qty ?? pos.quantity}</TableCell>
                           <TableCell className="text-right">
@@ -506,9 +523,9 @@ export default function SandboxPnL() {
                         <TableRow key={index}>
                           <TableCell className="font-semibold">
                             <button
-                              onClick={() => openTradingView(holding.symbol)}
+                              onClick={() => openChart(holding.symbol, holding.exchange)}
                               className="hover:text-primary transition-colors flex items-center gap-1.5 text-left font-semibold"
-                              title="Open chart in TradingView"
+                              title="Open Chart"
                             >
                               {holding.symbol}
                               <ExternalLink className="h-3.5 w-3.5 opacity-60" />
@@ -586,9 +603,9 @@ export default function SandboxPnL() {
                           </TableCell>
                           <TableCell className="font-semibold">
                             <button
-                              onClick={() => openTradingView(trade.symbol)}
+                              onClick={() => openChart(trade.symbol, trade.exchange)}
                               className="hover:text-primary transition-colors flex items-center gap-1.5 text-left font-semibold"
-                              title="Open chart in TradingView"
+                              title="Open Chart"
                             >
                               {trade.symbol}
                               <ExternalLink className="h-3.5 w-3.5 opacity-60" />

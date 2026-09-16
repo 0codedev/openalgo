@@ -611,6 +611,7 @@ class PositionManager:
                         "today_realized_pnl": float(today_realized),
                         "total_pnl_today": float(position_total_pnl_today),
                         "lot_size": pos_cv,  # contract_value multiplier (e.g. 0.01 for ETHUSD.P)
+                        "strategy": getattr(position, "strategy", "") or "",
                     }
                 )
 

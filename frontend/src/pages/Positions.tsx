@@ -145,15 +145,17 @@ const PRODUCT_COLORS: Record<string, string> = {
   NRML: 'bg-slate-500/20 text-slate-600 border-slate-500/30',
 }
 
-const openTradingView = (symbol: string) => {
+const openChart = (symbol: string, exchange?: string) => {
   if (!symbol) return;
-  let cleanSymbol = symbol.trim().toUpperCase();
-  const optionMatch = cleanSymbol.match(/^([A-Z\-]+)\d{2}[A-Z]{3}\d+(?:CE|PE)$/i);
-  if (optionMatch && optionMatch[1]) {
-    cleanSymbol = optionMatch[1];
+  const cleanSymbol = symbol.trim().toUpperCase();
+  const isOption = /(?:CE|PE)$/i.test(cleanSymbol);
+  if (isOption) {
+    const ex = exchange || (cleanSymbol.includes('SENSEX') ? 'BFO' : 'NFO');
+    window.open(`/trading?symbol=${encodeURIComponent(cleanSymbol)}&exchange=${encodeURIComponent(ex)}`, '_blank');
+    return;
   }
-  cleanSymbol = cleanSymbol.replace('NSE:', '').replace('BSE:', '').replace('NFO:', '');
-  const url = `https://www.tradingview.com/chart/?symbol=NSE:${cleanSymbol}`;
+  const stockSymbol = cleanSymbol.replace('NSE:', '').replace('BSE:', '').replace('NFO:', '');
+  const url = `https://www.tradingview.com/chart/?symbol=NSE:${stockSymbol}`;
   window.open(url, '_blank');
 };
 
@@ -496,6 +498,7 @@ export default function Positions() {
         'Symbol',
         'Exchange',
         ...(isCrypto ? [] : ['Product']),
+        'Strategy',
         'Quantity',
         'Avg Price',
         'LTP',
@@ -506,6 +509,7 @@ export default function Positions() {
         sanitizeCSV(p.symbol),
         sanitizeCSV(p.exchange),
         ...(isCrypto ? [] : [sanitizeCSV(p.product)]),
+        sanitizeCSV(p.strategy || '-'),
         sanitizeCSV(p.quantity),
         sanitizeCSV(p.average_price),
         sanitizeCSV(p.ltp),
@@ -901,6 +905,7 @@ export default function Positions() {
                     <SortableHeader column={0} label="Symbol" className="w-[140px]" />
                     <TableHead className="w-[80px]">Exchange</TableHead>
                     {!isCrypto && <TableHead className="w-[80px]">Product</TableHead>}
+                    <TableHead className="w-[120px]">Strategy</TableHead>
                     <SortableHeader column={3} label="Qty" className="w-[80px] text-right" />
                     <SortableHeader column={4} label="Avg Price" className="w-[120px] text-right" />
                     <TableHead className="w-[120px] text-right">LTP</TableHead>
@@ -923,7 +928,7 @@ export default function Positions() {
                             className="bg-muted/50 cursor-pointer hover:bg-muted"
                             onClick={() => toggleGroup(groupKey)}
                           >
-                            <TableCell colSpan={6}>
+                            <TableCell colSpan={isCrypto ? 6 : 7}>
                               <div className="flex items-center gap-3 py-1 font-semibold">
                                 {isCollapsed ? (
                                   <ChevronRight className="h-4 w-4 text-muted-foreground" />
@@ -964,9 +969,9 @@ export default function Positions() {
                             <TableRow key={`${position.symbol}-${position.exchange}-${index}`} className="group">
                               <TableCell className="w-[140px] font-medium">
                                 <button
-                                  onClick={() => openTradingView(position.symbol)}
+                                  onClick={() => openChart(position.symbol, position.exchange)}
                                   className="hover:text-indigo-500 font-medium transition-colors flex items-center gap-1.5 text-left"
-                                  title="Open in TradingView"
+                                  title="Open Chart"
                                 >
                                   {position.symbol}
                                   <ExternalLink size={12} className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground" />
@@ -990,6 +995,19 @@ export default function Positions() {
                                   </Badge>
                                 </TableCell>
                               )}
+                              <TableCell className="w-[120px]">
+                                {position.strategy ? (
+                                  <Badge
+                                    variant="secondary"
+                                    className="font-mono text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 max-w-[130px] truncate"
+                                    title={position.strategy}
+                                  >
+                                    {position.strategy}
+                                  </Badge>
+                                ) : (
+                                  <span className="text-muted-foreground text-xs">-</span>
+                                )}
+                              </TableCell>
                               <TableCell
                                 className={cn(
                                   'w-[80px] text-right font-medium',
@@ -1049,7 +1067,7 @@ export default function Positions() {
                 </TableBody>
                 <TableFooter>
                   <TableRow className="bg-muted/50">
-                    <TableCell colSpan={6} className="text-right text-muted-foreground">
+                    <TableCell colSpan={isCrypto ? 6 : 7} className="text-right text-muted-foreground">
                       Total P&L:
                     </TableCell>
                     <TableCell

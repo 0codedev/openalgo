@@ -137,6 +137,7 @@ class SandboxPositions(Base):
     product = Column(String(20), nullable=False)  # CNC, NRML, MIS
     quantity = Column(Integer, nullable=False)  # Net quantity (can be negative for short)
     average_price = Column(DECIMAL(10, 2), nullable=False)  # Average entry price
+    strategy = Column(String(100), nullable=True)  # Strategy name (single or comma-separated)
 
     # MTM tracking
     ltp = Column(DECIMAL(10, 2), nullable=True)  # Last traded price
@@ -419,9 +420,28 @@ def init_db():
 
     _migrate_add_gtt_trigger_direction()
     _migrate_add_order_gtt_leg_id()
+    _migrate_add_position_strategy()
 
     # Initialize default configuration
     init_default_config()
+
+
+def _migrate_add_position_strategy():
+    """Add sandbox_positions.strategy to databases created without it."""
+    from sqlalchemy import text
+
+    try:
+        with engine.connect() as conn:
+            existing = {
+                row[1] for row in conn.execute(text("PRAGMA table_info(sandbox_positions)"))
+            }
+            if not existing or "strategy" in existing:
+                return
+            conn.execute(text("ALTER TABLE sandbox_positions ADD COLUMN strategy VARCHAR(100)"))
+            conn.commit()
+            logger.info("Added sandbox_positions.strategy")
+    except Exception as e:
+        logger.exception(f"Could not add sandbox_positions.strategy: {e}")
 
 
 def _migrate_add_order_gtt_leg_id():

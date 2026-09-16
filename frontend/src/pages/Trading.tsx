@@ -1,6 +1,7 @@
 import { LayoutGrid, Link2 as LinkIcon } from 'lucide-react'
 import { createLinkGroup, type LinkGroup } from 'openalgo-charts'
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router'
 import { Navbar } from '@/components/layout/Navbar'
 
 // Lazy, because the panel pulls the markdown renderer and the syntax
@@ -249,12 +250,29 @@ export default function Trading() {
    * their search returned no results at all. This is populated as each pane
    * builds, so the panels work from the first paint.
    */
+  const [searchParams] = useSearchParams()
   const terminalsRef = useRef<Record<string, TradingTerminal | null>>({})
 
-  const noteTerminal = useCallback((paneId: string, terminal: TradingTerminal | null) => {
-    if (terminal) terminalsRef.current[paneId] = terminal
-    else delete terminalsRef.current[paneId]
-  }, [])
+  const noteTerminal = useCallback(
+    (paneId: string, terminal: TradingTerminal | null) => {
+      if (terminal) {
+        terminalsRef.current[paneId] = terminal
+        if (paneId === 'p0') {
+          const symbolParam =
+            searchParams.get('symbol') || new URLSearchParams(window.location.search).get('symbol')
+          const exchangeParam =
+            searchParams.get('exchange') || new URLSearchParams(window.location.search).get('exchange')
+          if (symbolParam) {
+            const ex = exchangeParam || (symbolParam.includes('SENSEX') ? 'BFO' : 'NFO')
+            void terminal.loadSymbol({ symbol: symbolParam, exchange: ex })
+          }
+        }
+      } else {
+        delete terminalsRef.current[paneId]
+      }
+    },
+    [searchParams]
+  )
 
   /** The pane a panel acts on: the focused one, else any pane that is up. */
   const panelTarget = useCallback(
@@ -265,6 +283,17 @@ export default function Trading() {
       null,
     [focusedPane]
   )
+
+  useEffect(() => {
+    const symbolParam = searchParams.get('symbol')
+    const exchangeParam = searchParams.get('exchange')
+    if (!symbolParam) return
+    const ex = exchangeParam || (symbolParam.includes('SENSEX') ? 'BFO' : 'NFO')
+    const t = terminalsRef.current['p0'] ?? panelTarget()
+    if (t) {
+      void t.loadSymbol({ symbol: symbolParam, exchange: ex })
+    }
+  }, [searchParams, panelTarget])
 
   const focusPane = useCallback((t: TradingTerminal | null, paneId?: string) => {
     activeRef.current = t

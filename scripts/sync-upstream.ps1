@@ -62,9 +62,15 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "  [OK] Frontend build succeeded." -ForegroundColor Green
 
-# Step 6: Push to your GitHub fork
+# Step 6: Export custom modifications patch
+Write-Host "`n[6/7] Exporting custom modifications patch..." -ForegroundColor Yellow
+$PatchFile = Join-Path $RepoRoot "openalgo_custom_modifications.patch"
+git diff upstream/main frontend/src blueprints database sandbox | Out-File -FilePath $PatchFile -Encoding utf8
+Write-Host "  [OK] Patch exported to: $PatchFile" -ForegroundColor Green
+
+# Step 7: Push to your GitHub fork
 if (-not $SkipPush) {
-    Write-Host "`n[6/6] Pushing to your GitHub fork (0codedev/openalgo)..." -ForegroundColor Yellow
+    Write-Host "`n[7/7] Pushing to your GitHub fork (0codedev/openalgo)..." -ForegroundColor Yellow
     git add -A
     $status = git status --porcelain
     if ($status) {
@@ -77,7 +83,7 @@ if (-not $SkipPush) {
         Write-Host "  [WARN] Could not push to origin. Check if fork exists or push manually." -ForegroundColor Yellow
     }
 } else {
-    Write-Host "`n[6/6] SkipPush enabled - skipping push to origin." -ForegroundColor DarkGray
+    Write-Host "`n[7/7] SkipPush enabled - skipping push to origin." -ForegroundColor DarkGray
 }
 
 Write-Host "`n==========================================" -ForegroundColor Green

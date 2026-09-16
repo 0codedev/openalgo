@@ -515,6 +515,7 @@ def api_my_pnl_data():
                     "today_realized_pnl": float(today_realized),
                     "all_time_realized_pnl": float(all_time_realized),
                     "status": "Open" if pos.quantity != 0 else "Closed",
+                    "strategy": getattr(pos, "strategy", "") or "",
                     "updated_at": pos.updated_at.strftime("%Y-%m-%d %H:%M:%S")
                     if pos.updated_at
                     else "",
@@ -959,6 +960,7 @@ def generate_positions_csv(positions):
         "Symbol",
         "Exchange",
         "Product",
+        "Strategy",
         "Quantity",
         "Average Price",
         "LTP",
@@ -978,6 +980,7 @@ def generate_positions_csv(positions):
             sanitize_csv_value(pos.symbol),
             sanitize_csv_value(pos.exchange),
             sanitize_csv_value(pos.product),
+            sanitize_csv_value(getattr(pos, "strategy", "") or "-"),
             pos.quantity,
             float(pos.average_price),
             float(pos.ltp) if pos.ltp else 0.0,

@@ -129,15 +129,17 @@ const statusConfig: Record<string, { icon: typeof CheckCircle2; color: string; l
   open: { icon: Clock, color: 'text-blue-500', label: 'open' },
 }
 
-const openTradingView = (symbol: string) => {
+const openChart = (symbol: string, exchange?: string) => {
   if (!symbol) return;
-  let cleanSymbol = symbol.trim().toUpperCase();
-  const optionMatch = cleanSymbol.match(/^([A-Z\-]+)\d{2}[A-Z]{3}\d+(?:CE|PE)$/i);
-  if (optionMatch && optionMatch[1]) {
-    cleanSymbol = optionMatch[1];
+  const cleanSymbol = symbol.trim().toUpperCase();
+  const isOption = /(?:CE|PE)$/i.test(cleanSymbol);
+  if (isOption) {
+    const ex = exchange || (cleanSymbol.includes('SENSEX') ? 'BFO' : 'NFO');
+    window.open(`/trading?symbol=${encodeURIComponent(cleanSymbol)}&exchange=${encodeURIComponent(ex)}`, '_blank');
+    return;
   }
-  cleanSymbol = cleanSymbol.replace('NSE:', '').replace('BSE:', '').replace('NFO:', '');
-  const url = `https://www.tradingview.com/chart/?symbol=NSE:${cleanSymbol}`;
+  const stockSymbol = cleanSymbol.replace('NSE:', '').replace('BSE:', '').replace('NFO:', '');
+  const url = `https://www.tradingview.com/chart/?symbol=NSE:${stockSymbol}`;
   window.open(url, '_blank');
 };
 
@@ -391,6 +393,7 @@ export default function OrderBook() {
         'Trigger',
         'Type',
         ...(isCrypto ? [] : ['Product']),
+        'Strategy',
         'Order ID',
         'Status',
         'Time',
@@ -404,6 +407,7 @@ export default function OrderBook() {
         sanitizeCSV(o.trigger_price),
         sanitizeCSV(o.pricetype),
         ...(isCrypto ? [] : [sanitizeCSV(o.product)]),
+        sanitizeCSV(o.strategy || '-'),
         sanitizeCSV(o.orderid),
         sanitizeCSV(o.order_status),
         sanitizeCSV(o.timestamp),
@@ -688,6 +692,7 @@ export default function OrderBook() {
                         <TableHead className="w-[100px] text-right">Trigger</TableHead>
                         <TableHead className="w-[80px]">Type</TableHead>
                         {!isCrypto && <TableHead className="w-[70px]">Product</TableHead>}
+                        <TableHead className="w-[140px]">Strategy</TableHead>
                         <TableHead className="w-[140px]">Order ID</TableHead>
                         <TableHead
                           className="w-[100px] cursor-pointer hover:bg-muted/50 transition-colors"
@@ -731,9 +736,9 @@ export default function OrderBook() {
                           <TableRow key={`${order.orderid}-${index}`} className="group">
                             <TableCell className="font-medium">
                               <button
-                                onClick={() => openTradingView(order.symbol)}
+                                onClick={() => openChart(order.symbol, order.exchange)}
                                 className="hover:text-indigo-500 font-medium transition-colors flex items-center gap-1.5 text-left"
-                                title="Open in TradingView"
+                                title="Open Chart"
                               >
                                 {order.symbol}
                                 <ExternalLink size={12} className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground" />
@@ -765,6 +770,19 @@ export default function OrderBook() {
                                 <Badge variant="outline">{order.product}</Badge>
                               </TableCell>
                             )}
+                            <TableCell>
+                              {order.strategy ? (
+                                <Badge
+                                  variant="secondary"
+                                  className="font-mono text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 max-w-[150px] truncate block"
+                                  title={order.strategy}
+                                >
+                                  {order.strategy}
+                                </Badge>
+                              ) : (
+                                <span className="text-muted-foreground text-xs font-mono">-</span>
+                              )}
+                            </TableCell>
                             <TableCell className="font-mono text-xs">{order.orderid}</TableCell>
                             <TableCell>
                               <div className={cn('flex items-center gap-1', status.color)}>
