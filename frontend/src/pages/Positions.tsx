@@ -1052,7 +1052,11 @@ export default function Positions() {
                               <TableCell
                                 className={cn(
                                   'w-[80px] text-right font-medium',
-                                  position.quantity > 0 ? 'text-green-600' : 'text-red-600'
+                                  position.quantity === 0
+                                    ? 'text-muted-foreground'
+                                    : position.quantity > 0
+                                      ? 'text-green-600'
+                                      : 'text-red-600'
                                 )}
                               >
                                 {position.quantity}
@@ -1141,15 +1145,17 @@ export default function Positions() {
                                 {calculatePnlPercent(position).toFixed(2)}%
                               </TableCell>
                               <TableCell className="w-[60px] text-right">
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                                  onClick={() => handleClosePosition(position)}
-                                  aria-label={`Close ${position.symbol} position`}
-                                >
-                                  <X className="h-4 w-4" />
-                                </Button>
+                                {position.quantity !== 0 && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                                    onClick={() => handleClosePosition(position)}
+                                    aria-label={`Close ${position.symbol} position`}
+                                  >
+                                    <X className="h-4 w-4" />
+                                  </Button>
+                                )}
                               </TableCell>
                             </TableRow>
                           ))}
