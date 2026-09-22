@@ -55,19 +55,19 @@ export const useThemeStore = create<ThemeStore>()(
       isTogglingMode: false,
 
       setMode: (mode) => {
-        // Only allow theme change in live mode
-        if (get().appMode !== 'live') return
-
         set({ mode })
         if (typeof document !== 'undefined') {
-          document.documentElement.classList.toggle('dark', mode === 'dark')
+          const appMode = get().appMode
+          document.documentElement.classList.remove('analyzer', 'sandbox', 'dark')
+          if (appMode === 'live') {
+            document.documentElement.classList.toggle('dark', mode === 'dark')
+          } else {
+            document.documentElement.classList.add(mode === 'dark' ? 'analyzer' : 'sandbox')
+          }
         }
       },
 
       setColor: (color) => {
-        // Only allow color change in live mode
-        if (get().appMode !== 'live') return
-
         set({ color })
         if (typeof document !== 'undefined') {
           document.documentElement.setAttribute('data-theme', color)
@@ -81,13 +81,13 @@ export const useThemeStore = create<ThemeStore>()(
           // Remove all mode classes first
           document.documentElement.classList.remove('analyzer', 'sandbox', 'dark')
 
+          const savedMode = get().mode
           if (appMode === 'live') {
             // Restore the saved light/dark mode when returning to live
-            const savedMode = get().mode
             document.documentElement.classList.toggle('dark', savedMode === 'dark')
           } else {
-            // Analyzer mode uses its own dark purple theme (like dracula)
-            document.documentElement.classList.add('analyzer')
+            // Analyzer mode uses its own dark purple theme for dark, or sandbox theme for light
+            document.documentElement.classList.add(savedMode === 'dark' ? 'analyzer' : 'sandbox')
           }
         }
         // Notify listeners if mode changed
@@ -97,14 +97,8 @@ export const useThemeStore = create<ThemeStore>()(
       },
 
       toggleMode: () => {
-        // Only allow toggle in live mode
-        if (get().appMode !== 'live') return
-
         const newMode = get().mode === 'light' ? 'dark' : 'light'
-        set({ mode: newMode })
-        if (typeof document !== 'undefined') {
-          document.documentElement.classList.toggle('dark', newMode === 'dark')
-        }
+        get().setMode(newMode)
       },
 
       // Toggle app mode via backend API
@@ -181,9 +175,9 @@ export const useThemeStore = create<ThemeStore>()(
         if (state && typeof document !== 'undefined') {
           document.documentElement.classList.remove('analyzer', 'sandbox', 'dark')
 
-          // Apply persisted appMode for visual continuity
+          // Apply persisted appMode and light/dark preference
           if (state.appMode === 'analyzer') {
-            document.documentElement.classList.add('analyzer')
+            document.documentElement.classList.add(state.mode === 'dark' ? 'analyzer' : 'sandbox')
           } else {
             // Live mode - apply light/dark preference
             document.documentElement.classList.toggle('dark', state.mode === 'dark')

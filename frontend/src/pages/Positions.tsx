@@ -14,9 +14,12 @@ import {
   TrendingUp,
   X,
   ExternalLink,
+  Eye,
+  EyeOff,
 } from 'lucide-react'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { tradingApi } from '@/api/trading'
+import { ManageProtectionDialog } from '@/components/trading/ManageProtectionDialog'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
   AlertDialog,
@@ -58,6 +61,7 @@ import { useSupportedExchanges } from '@/hooks/useSupportedExchanges'
 import { cn, makeFormatCurrency, sanitizeCSV } from '@/lib/utils'
 import { useAuthStore } from '@/stores/authStore'
 import { onModeChange } from '@/stores/themeStore'
+import { openChart } from '@/utils/chartUrl'
 import type { Position } from '@/types/trading'
 import { showToast } from '@/utils/toast'
 import { EmptyState } from '@/components/ui/empty-state'
@@ -145,19 +149,6 @@ const PRODUCT_COLORS: Record<string, string> = {
   NRML: 'bg-slate-500/20 text-slate-600 border-slate-500/30',
 }
 
-const openChart = (symbol: string, exchange?: string) => {
-  if (!symbol) return;
-  const cleanSymbol = symbol.trim().toUpperCase();
-  const isOption = /(?:CE|PE)$/i.test(cleanSymbol);
-  if (isOption) {
-    const ex = exchange || (cleanSymbol.includes('SENSEX') ? 'BFO' : 'NFO');
-    window.open(`/trading?symbol=${encodeURIComponent(cleanSymbol)}&exchange=${encodeURIComponent(ex)}`, '_blank');
-    return;
-  }
-  const stockSymbol = cleanSymbol.replace('NSE:', '').replace('BSE:', '').replace('NFO:', '');
-  const url = `https://www.tradingview.com/chart/?symbol=NSE:${stockSymbol}`;
-  window.open(url, '_blank');
-};
 
 export default function Positions() {
   const { apiKey, user } = useAuthStore()
@@ -184,6 +175,19 @@ export default function Positions() {
   const [sortColumn, setSortColumn] = useState<SortColumn>(null)
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [hideClosed, setHideClosed] = useState<boolean>(() => {
+    const saved = localStorage.getItem('openalgo_positions_hide_closed')
+    return saved !== null ? saved === 'true' : true
+  })
+  const [protectionModal, setProtectionModal] = useState<{
+    open: boolean
+    position: Position | null
+    initialTab: 'SL' | 'TARGET'
+  }>({ open: false, position: null, initialTab: 'SL' })
+
+  const handleOpenProtection = (position: Position, tab: 'SL' | 'TARGET') => {
+    setProtectionModal({ open: true, position, initialTab: tab })
+  }
 
   // Centralized real-time price hook with WebSocket + MultiQuotes fallback
   // Automatically pauses when tab is hidden
@@ -320,12 +324,18 @@ export default function Positions() {
     [grouping]
   )
 
+  const closedCount = useMemo(() => {
+    return enhancedPositions.filter((p) => (p.quantity || 0) === 0).length
+  }, [enhancedPositions])
+
   // Filter positions (use enhancedPositions for real-time LTP/PnL)
   const filteredPositions = useMemo(() => {
     return enhancedPositions.filter((pos) => {
+      const qty = pos.quantity || 0
+      if (hideClosed && qty === 0) return false
+
       if (filters.product.length > 0 && !filters.product.includes(pos.product)) return false
 
-      const qty = pos.quantity || 0
       if (filters.direction.length > 0) {
         const isLong = qty > 0
         const isShort = qty < 0
@@ -339,7 +349,7 @@ export default function Positions() {
 
       return true
     })
-  }, [enhancedPositions, filters])
+  }, [enhancedPositions, filters, hideClosed])
 
   // Sort positions
   const sortedPositions = useMemo(() => {
@@ -765,6 +775,35 @@ export default function Positions() {
             Refresh
           </Button>
 
+          {closedCount > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              className={cn(
+                'transition-colors',
+                hideClosed ? 'text-muted-foreground' : 'text-primary bg-primary/10 border-primary/30'
+              )}
+              onClick={() => {
+                const next = !hideClosed
+                setHideClosed(next)
+                localStorage.setItem('openalgo_positions_hide_closed', String(next))
+              }}
+              title={hideClosed ? 'Click to show closed positions' : 'Click to hide closed positions'}
+            >
+              {hideClosed ? (
+                <>
+                  <Eye className="h-4 w-4 mr-2" />
+                  Show Closed ({closedCount})
+                </>
+              ) : (
+                <>
+                  <EyeOff className="h-4 w-4 mr-2" />
+                  Hide Closed ({closedCount})
+                </>
+              )}
+            </Button>
+          )}
+
           <Button variant="outline" size="sm" onClick={exportToCSV}>
             <Download className="h-4 w-4 mr-2" />
             Export
@@ -907,10 +946,12 @@ export default function Positions() {
                     {!isCrypto && <TableHead className="w-[80px]">Product</TableHead>}
                     <TableHead className="w-[120px]">Strategy</TableHead>
                     <SortableHeader column={3} label="Qty" className="w-[80px] text-right" />
-                    <SortableHeader column={4} label="Avg Price" className="w-[120px] text-right" />
-                    <TableHead className="w-[120px] text-right">LTP</TableHead>
+                    <SortableHeader column={4} label="Avg Price" className="w-[110px] text-right" />
+                    <TableHead className="w-[110px] text-right">LTP</TableHead>
+                    <TableHead className="w-[110px] text-center">Stop Loss</TableHead>
+                    <TableHead className="w-[110px] text-center">Target</TableHead>
                     <SortableHeader column={6} label="P&L" className="w-[120px] text-right" />
-                    <SortableHeader column={7} label="P&L %" className="w-[100px] text-right" />
+                    <SortableHeader column={7} label="P&L %" className="w-[90px] text-right" />
                     <TableHead className="w-[60px] text-right">Action</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -928,7 +969,7 @@ export default function Positions() {
                             className="bg-muted/50 cursor-pointer hover:bg-muted"
                             onClick={() => toggleGroup(groupKey)}
                           >
-                            <TableCell colSpan={isCrypto ? 6 : 7}>
+                            <TableCell colSpan={isCrypto ? 8 : 9}>
                               <div className="flex items-center gap-3 py-1 font-semibold">
                                 {isCollapsed ? (
                                   <ChevronRight className="h-4 w-4 text-muted-foreground" />
@@ -1016,12 +1057,63 @@ export default function Positions() {
                               >
                                 {position.quantity}
                               </TableCell>
-                              <TableCell className="w-[120px] text-right font-mono">
+                              <TableCell className="w-[110px] text-right font-mono">
                                 {formatCurrency(position.average_price)}
                               </TableCell>
-                              <TableCell className="w-[120px] text-right font-mono">
+                              <TableCell className="w-[110px] text-right font-mono">
                                 {position.ltp !== undefined ? formatCurrency(position.ltp) : '-'}
                               </TableCell>
+
+                              {/* Stop Loss Cell */}
+                              <TableCell className="w-[110px] text-center">
+                                {position.quantity === 0 ? (
+                                  <span className="text-muted-foreground text-xs">-</span>
+                                ) : position.stop_loss ? (
+                                  <Badge
+                                    variant="outline"
+                                    className="bg-amber-500/10 text-amber-500 hover:bg-amber-500/20 border-amber-500/30 font-mono text-xs cursor-pointer transition-colors"
+                                    onClick={() => handleOpenProtection(position, 'SL')}
+                                    title={`Click to edit Stop Loss. Order ID: ${position.stop_loss.order_id} (${position.stop_loss.price_type})`}
+                                  >
+                                    ₹{Number(position.stop_loss.trigger_price).toFixed(2)}
+                                  </Badge>
+                                ) : (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 px-2 text-[11px] text-amber-500/80 hover:text-amber-400 hover:bg-amber-500/10 border border-dashed border-amber-500/30 rounded"
+                                    onClick={() => handleOpenProtection(position, 'SL')}
+                                  >
+                                    + Set SL
+                                  </Button>
+                                )}
+                              </TableCell>
+
+                              {/* Target Cell */}
+                              <TableCell className="w-[110px] text-center">
+                                {position.quantity === 0 ? (
+                                  <span className="text-muted-foreground text-xs">-</span>
+                                ) : position.target ? (
+                                  <Badge
+                                    variant="outline"
+                                    className="bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 border-emerald-500/30 font-mono text-xs cursor-pointer transition-colors"
+                                    onClick={() => handleOpenProtection(position, 'TARGET')}
+                                    title={`Click to edit Target. Order ID: ${position.target.order_id}`}
+                                  >
+                                    ₹{Number(position.target.price).toFixed(2)}
+                                  </Badge>
+                                ) : (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 px-2 text-[11px] text-emerald-500/80 hover:text-emerald-400 hover:bg-emerald-500/10 border border-dashed border-emerald-500/30 rounded"
+                                    onClick={() => handleOpenProtection(position, 'TARGET')}
+                                  >
+                                    + Set TGT
+                                  </Button>
+                                )}
+                              </TableCell>
+
                               <TableCell
                                 className={cn(
                                   'w-[120px] text-right font-medium',
@@ -1039,7 +1131,7 @@ export default function Positions() {
                               </TableCell>
                               <TableCell
                                 className={cn(
-                                  'w-[100px] text-right',
+                                  'w-[90px] text-right',
                                   isProfit(calculatePnlPercent(position))
                                     ? 'text-green-600'
                                     : 'text-red-600'
@@ -1067,7 +1159,7 @@ export default function Positions() {
                 </TableBody>
                 <TableFooter>
                   <TableRow className="bg-muted/50">
-                    <TableCell colSpan={isCrypto ? 6 : 7} className="text-right text-muted-foreground">
+                    <TableCell colSpan={isCrypto ? 8 : 9} className="text-right text-muted-foreground">
                       Total P&L:
                     </TableCell>
                     <TableCell
@@ -1087,6 +1179,15 @@ export default function Positions() {
           )}
         </CardContent>
       </Card>
+
+      {/* Manage Protection Dialog (SL & Target) */}
+      <ManageProtectionDialog
+        open={protectionModal.open}
+        position={protectionModal.position}
+        initialTab={protectionModal.initialTab}
+        onOpenChange={(open) => setProtectionModal((prev) => ({ ...prev, open }))}
+        onSuccess={() => fetchPositions(true)}
+      />
     </div>
   )
 }

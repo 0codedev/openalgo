@@ -767,7 +767,6 @@ export default function HistorifyCharts() {
             size="icon"
             className="h-8 w-8"
             onClick={toggleMode}
-            disabled={appMode !== 'live'}
             title={mode === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
             aria-label={mode === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
           >

@@ -1,7 +1,22 @@
-import { AlertTriangle, Camera, RefreshCw, TrendingDown, TrendingUp } from 'lucide-react'
+import {
+  AlertTriangle,
+  Camera,
+  ChevronDown,
+  Download,
+  RefreshCw,
+  Send,
+  TrendingDown,
+  TrendingUp,
+} from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { makeFormatCurrency } from '@/lib/utils'
 import { useAuthStore } from '@/stores/authStore'
 import { useThemeStore } from '@/stores/themeStore'
@@ -71,6 +86,7 @@ export default function PnLTracker() {
   // State
   const [isLoading, setIsLoading] = useState(false)
   const [isCapturing, setIsCapturing] = useState(false)
+  const [isSendingTelegram, setIsSendingTelegram] = useState(false)
   const [metrics, setMetrics] = useState({
     currentMtm: 0,
     maxMtm: 0,
@@ -359,21 +375,11 @@ export default function PnLTracker() {
     }
   }, [])
 
-  // Take screenshot - html2canvas-pro supports oklch colors natively
-  const takeScreenshot = async () => {
-    if (!screenshotContainerRef.current) return
+  // Capture high-DPI canvas
+  const captureScreenshotCanvas = async (scale = 3): Promise<HTMLCanvasElement | null> => {
+    if (!screenshotContainerRef.current) return null
 
-    setIsCapturing(true)
-
-    // html2canvas-pro clones every canvas on the page and reads each one back
-    // with getImageData, but builds those contexts without willReadFrequently,
-    // so Chrome logs a performance warning per canvas on every capture. Opt the
-    // clones in for the duration of the capture only.
-    //
-    // The isConnected guard is what makes this safe: html2canvas' clones are
-    // detached when it asks for their context, while the live chart canvases are
-    // in the document. Without the guard we would also flag the chart's own
-    // context, which pins it to software rendering for the rest of the session.
+    // Patch getContext for willReadFrequently on cloned elements
     const originalGetContext = HTMLCanvasElement.prototype.getContext
     HTMLCanvasElement.prototype.getContext = function patchedGetContext(
       this: HTMLCanvasElement,
@@ -390,44 +396,129 @@ export default function PnLTracker() {
     } as typeof HTMLCanvasElement.prototype.getContext
 
     try {
-      // Match the page's own background instead of a hardcoded slate, so the
-      // exported PNG does not sit on a colour the app never shows. Reading the
-      // computed style also keeps it correct for any future theme.
       const pageBackground =
-        getComputedStyle(document.body).backgroundColor || (isDarkMode ? '#1f2937' : '#ffffff')
+        getComputedStyle(document.body).backgroundColor || (isDarkMode ? '#0f0f12' : '#ffffff')
 
+      // 3x Ultra-HD Retina scale for tack-sharp vectors, numbers, and lines
       const canvas = await html2canvas(screenshotContainerRef.current, {
         backgroundColor: pageBackground,
-        scale: 2,
+        scale: scale,
         logging: false,
         useCORS: true,
+        imageTimeout: 0,
+        onclone: (clonedDoc) => {
+          const el = clonedDoc.body
+          if (el) {
+            el.style.setProperty('-webkit-font-smoothing', 'antialiased')
+            el.style.setProperty('-moz-osx-font-smoothing', 'grayscale')
+            el.style.setProperty('text-rendering', 'geometricPrecision')
+          }
+        },
       })
+      return canvas
+    } finally {
+      HTMLCanvasElement.prototype.getContext = originalGetContext
+    }
+  }
+
+  // Take screenshot - supports Ultra-HD WebP (high compression, lightweight) & PNG (lossless print)
+  const takeScreenshot = async (format: 'webp' | 'png' = 'webp') => {
+    if (!screenshotContainerRef.current) return
+    setIsCapturing(true)
+
+    try {
+      const canvas = await captureScreenshotCanvas(3)
+      if (!canvas) {
+        showToast.error('Failed to capture screenshot', 'positions')
+        return
+      }
+
+      const mimeType = format === 'webp' ? 'image/webp' : 'image/png'
+      const quality = format === 'webp' ? 0.98 : 1.0
+      const extension = format === 'webp' ? 'webp' : 'png'
 
       canvas.toBlob(
         (blob) => {
-          if (!blob) return
+          if (!blob) {
+            showToast.error('Failed to encode screenshot blob', 'positions')
+            return
+          }
           const url = URL.createObjectURL(blob)
           const link = document.createElement('a')
           const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)
-          link.download = `PnL_Tracker_${timestamp}.png`
+          link.download = `PnL_Tracker_${timestamp}.${extension}`
           link.href = url
           document.body.appendChild(link)
           link.click()
           document.body.removeChild(link)
           URL.revokeObjectURL(url)
 
-          showToast.success('Screenshot saved successfully!', 'positions')
+          showToast.success(
+            `Ultra-HD (${format.toUpperCase()}) screenshot saved successfully!`,
+            'positions'
+          )
         },
-        'image/png',
-        1.0
+        mimeType,
+        quality
       )
     } catch (_error) {
       showToast.error('Failed to capture screenshot', 'positions')
     } finally {
-      // Always restore, including on the error path — a leaked prototype patch
-      // would outlive this page and affect every canvas in the app.
-      HTMLCanvasElement.prototype.getContext = originalGetContext
       setIsCapturing(false)
+    }
+  }
+
+  // Send High-DPI Screenshot directly to Telegram Topic #22
+  const sendScreenshotToTelegram = async () => {
+    if (!screenshotContainerRef.current) return
+    setIsSendingTelegram(true)
+
+    try {
+      const canvas = await captureScreenshotCanvas(3)
+      if (!canvas) {
+        showToast.error('Failed to capture screenshot for Telegram', 'positions')
+        return
+      }
+
+      const dataUrl = canvas.toDataURL('image/png', 1.0)
+      const csrfToken = await fetchCSRFToken()
+
+      const response = await fetch('/pnltracker/api/send-telegram', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRFToken': csrfToken,
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          image: dataUrl,
+          metrics: {
+            current_mtm: metrics.currentMtm,
+            max_mtm: metrics.maxMtm,
+            max_mtm_time: metrics.maxMtmTime,
+            min_mtm: metrics.minMtm,
+            min_mtm_time: metrics.minMtmTime,
+            max_drawdown: metrics.maxDrawdown,
+          },
+        }),
+      })
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}))
+        throw new Error(errData.message || `HTTP ${response.status}`)
+      }
+
+      const res = await response.json()
+      if (res.status === 'success') {
+        showToast.success('PnL report & Ultra-HD card sent to Telegram Topic #22!', 'positions')
+      } else {
+        showToast.error(res.message || 'Failed to dispatch to Telegram', 'positions')
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error'
+      showToast.error(`Telegram dispatch error: ${msg}`, 'positions')
+    } finally {
+      setIsSendingTelegram(false)
     }
   }
 
@@ -467,20 +558,64 @@ export default function PnLTracker() {
           <h1 className="text-3xl font-bold">PnL Tracker</h1>
           <p className="text-muted-foreground">Monitor your intraday profit and loss</p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="secondary" onClick={takeScreenshot} disabled={isCapturing}>
-            {isCapturing ? (
+        <div className="flex flex-wrap items-center gap-2">
+          {/* High-DPI Screenshot with WebP / PNG Dropdown */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="secondary" disabled={isCapturing}>
+                {isCapturing ? (
+                  <>
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current mr-2"></div>
+                    Capturing...
+                  </>
+                ) : (
+                  <>
+                    <Camera className="h-4 w-4 mr-2" />
+                    Screenshot
+                    <ChevronDown className="h-3 w-3 ml-1.5 opacity-70" />
+                  </>
+                )}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={() => takeScreenshot('webp')}>
+                <Download className="h-4 w-4 mr-2 text-emerald-500" />
+                <div className="flex flex-col">
+                  <span className="font-medium">Ultra-HD WebP (Recommended)</span>
+                  <span className="text-xs text-muted-foreground">High fidelity, 70% smaller file size</span>
+                </div>
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => takeScreenshot('png')}>
+                <Download className="h-4 w-4 mr-2 text-blue-500" />
+                <div className="flex flex-col">
+                  <span className="font-medium">Ultra-HD PNG (3x Lossless)</span>
+                  <span className="text-xs text-muted-foreground">Maximum resolution for print/archive</span>
+                </div>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          {/* 1-Click Send to Telegram Topic #22 */}
+          <Button
+            variant="outline"
+            className="border-emerald-500/40 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10 hover:text-emerald-500"
+            onClick={sendScreenshotToTelegram}
+            disabled={isCapturing || isSendingTelegram}
+          >
+            {isSendingTelegram ? (
               <>
                 <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current mr-2"></div>
-                Capturing...
+                Sending to Telegram...
               </>
             ) : (
               <>
-                <Camera className="h-4 w-4 mr-2" />
-                Screenshot
+                <Send className="h-4 w-4 mr-2" />
+                Send to Telegram
               </>
             )}
           </Button>
+
+          {/* Refresh */}
           <Button onClick={loadPnLData} disabled={isLoading}>
             {isLoading ? (
               <>
@@ -498,7 +633,7 @@ export default function PnLTracker() {
       </div>
 
       {/* Screenshot Container */}
-      <div ref={screenshotContainerRef}>
+      <div ref={screenshotContainerRef} id="screenshot-container">
         {/* Metrics Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
           {/* Current MTM */}

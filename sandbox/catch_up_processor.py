@@ -301,23 +301,60 @@ def catch_up_daily_pnl_snapshot():
                 logger.debug(f"Catch-up: Skipping snapshot for user {user_id} on {yesterday} (no trades or open positions)")
                 continue
 
-            # Calculate yesterday's P&L from available data
-            # Since we don't have exact yesterday's values, use what we can reconstruct:
-            # - All-time realized - today's realized = yesterday's (approximate)
-            all_time_realized = Decimal(str(funds.realized_pnl or 0))
-            today_realized = Decimal(str(funds.today_realized_pnl or 0))
+            # Calculate yesterday's realized P&L from trades executed yesterday
+            yesterday_trades = (
+                SandboxTrades.query.filter(
+                    SandboxTrades.user_id == user_id,
+                    SandboxTrades.trade_timestamp >= yesterday_start,
+                    SandboxTrades.trade_timestamp <= yesterday_end,
+                )
+                .order_by(SandboxTrades.trade_timestamp.asc())
+                .all()
+            )
 
-            # Yesterday's realized = All-time - Today's
-            # This is approximate but better than nothing
-            yesterday_realized = all_time_realized - today_realized
+            positions_map = {}
+            yesterday_realized = Decimal("0.00")
 
-            # For unrealized, we can't know yesterday's values accurately
-            # So we'll set them to 0 (positions may have changed)
+            for t in yesterday_trades:
+                sym = t.symbol
+                action = t.action
+                qty = int(t.quantity)
+                price = Decimal(str(t.price))
+                opp_action = "SELL" if action == "BUY" else "BUY"
+
+                if sym not in positions_map:
+                    positions_map[sym] = []
+                inv = positions_map[sym]
+
+                while inv and inv[0][0] == opp_action and qty > 0:
+                    inv_act, inv_qty, inv_price = inv[0]
+                    fill = min(qty, inv_qty)
+                    if opp_action == "BUY" and action == "SELL":
+                        trade_pnl = fill * (price - inv_price)
+                    else:
+                        trade_pnl = fill * (inv_price - price)
+                    yesterday_realized += trade_pnl
+                    qty -= fill
+                    if fill == inv_qty:
+                        inv.pop(0)
+                    else:
+                        inv[0] = (inv_act, inv_qty - fill, inv_price)
+
+                if qty > 0:
+                    inv.append((action, qty, price))
+
             positions_unrealized = Decimal("0.00")
             holdings_unrealized = Decimal("0.00")
 
-            # Only create snapshot if there was some activity
-            if yesterday_realized != 0 or all_time_realized != 0:
+            # Only create snapshot if there was actual trading activity or open positions
+            if trade_count > 0 or open_positions_count > 0 or yesterday_realized != 0:
+                today_realized = Decimal(str(funds.today_realized_pnl or 0))
+                # Reconstruct yesterday's portfolio value before today's realized P&L
+                current_portfolio = Decimal(str(funds.available_balance or 0)) + Decimal(
+                    str(funds.used_margin or 0)
+                )
+                yesterday_portfolio = current_portfolio - today_realized
+
                 snapshot = SandboxDailyPnL(
                     user_id=user_id,
                     date=yesterday,
@@ -327,7 +364,7 @@ def catch_up_daily_pnl_snapshot():
                     total_mtm=yesterday_realized,  # Only realized since we don't know unrealized
                     available_balance=funds.available_balance,
                     used_margin=funds.used_margin,
-                    portfolio_value=funds.available_balance + funds.used_margin,
+                    portfolio_value=yesterday_portfolio,
                 )
                 db_session.add(snapshot)
                 logger.info(

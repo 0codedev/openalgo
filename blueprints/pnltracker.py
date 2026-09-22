@@ -1,3 +1,4 @@
+import base64
 import threading
 import time as time_module
 from datetime import datetime, timedelta
@@ -7,6 +8,7 @@ from importlib import import_module
 import numpy as np
 import pandas as pd
 import pytz
+import requests
 from flask import Blueprint, jsonify, redirect, render_template, request, session, url_for
 from flask_cors import cross_origin
 
@@ -1102,4 +1104,106 @@ def get_pnl_data():
 
     except Exception as e:
         logger.exception(f"Error calculating intraday PnL: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@pnltracker_bp.route("/pnltracker/api/send-telegram", methods=["POST"])
+@cross_origin()
+@check_session_validity
+def send_telegram_pnl():
+    """
+    Send high-DPI PnL Tracker screenshot and metrics to Telegram Topic #22 (Daily PnL Reports).
+    Sends both an inline photo for instant thread display and an uncompressed document
+    file for 100% lossless remote zoom with zero Telegram compression.
+    """
+    try:
+        data = request.get_json() or {}
+        image_data = data.get("image")
+        metrics = data.get("metrics", {})
+
+        current_mtm = float(metrics.get("current_mtm", 0.0))
+        max_mtm = float(metrics.get("max_mtm", 0.0))
+        max_mtm_time = metrics.get("max_mtm_time") or "--:--"
+        min_mtm = float(metrics.get("min_mtm", 0.0))
+        min_mtm_time = metrics.get("min_mtm_time") or "--:--"
+        max_drawdown = float(metrics.get("max_drawdown", 0.0))
+
+        ist = pytz.timezone("Asia/Kolkata")
+        now_ist = datetime.now(ist)
+        date_str = now_ist.strftime("%Y-%m-%d")
+        time_str = now_ist.strftime("%H:%M:%S")
+
+        # Telegram bot configuration for Daily PnL Reports (Topic #22)
+        # Read from environment variables to prevent secret leakage
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN") or ""
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "-1004326362283")
+        topic_id = int(os.environ.get("TELEGRAM_TOPIC_ID", "22"))
+
+        if not bot_token:
+            logger.warning("TELEGRAM_BOT_TOKEN not configured in environment; skipping Telegram dispatch.")
+            return jsonify({"status": "error", "message": "TELEGRAM_BOT_TOKEN not configured"}), 400
+
+        mtm_sign = "+" if current_mtm >= 0 else ""
+        mtm_emoji = "🟢" if current_mtm >= 0 else "🔴"
+
+        caption = (
+            f"💰 <b>OPENALGO — INTRADAY P&L TRACKER REPORT</b>\n"
+            f"📅 <b>Date:</b> <code>{date_str}</code> | ⏰ <code>{time_str} IST</code>\n"
+            f"═════════════════════════════\n"
+            f"{mtm_emoji} <b>Current MTM:</b> <code>{mtm_sign}₹{current_mtm:,.2f}</code>\n"
+            f"⚡ <b>Max MTM Peak:</b> <code>₹{max_mtm:,.2f}</code> at {max_mtm_time}\n"
+            f"🔻 <b>Min MTM:</b> <code>₹{min_mtm:,.2f}</code> at {min_mtm_time}\n"
+            f"⚠️ <b>Max Drawdown:</b> <code>₹{abs(max_drawdown):,.2f}</code> Peak-to-Trough\n"
+            f"═════════════════════════════\n"
+            f"🏛️ <i>WealthOS Autopilot & Live Analytics</i>"
+        )
+
+        if not image_data:
+            # Fallback: send text report if no image was provided
+            send_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            payload = {
+                "chat_id": chat_id,
+                "message_thread_id": topic_id,
+                "text": caption,
+                "parse_mode": "HTML",
+            }
+            requests.post(send_url, json=payload, timeout=10)
+            return jsonify({"status": "success", "message": "Text report sent to Telegram Topic #22"}), 200
+
+        # Decode base64 image (handles data:image/png;base64,... or raw base64)
+        if "," in image_data:
+            image_data = image_data.split(",", 1)[1]
+        img_bytes = base64.b64decode(image_data)
+
+        # 1. Send inline photo for instant card view
+        photo_url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+        photo_files = {"photo": ("pnl_tracker.png", img_bytes, "image/png")}
+        photo_data = {
+            "chat_id": chat_id,
+            "message_thread_id": topic_id,
+            "caption": caption,
+            "parse_mode": "HTML",
+        }
+        r_photo = requests.post(photo_url, data=photo_data, files=photo_files, timeout=20)
+
+        # 2. Also send uncompressed document file for 100% lossless remote zoom
+        doc_url = f"https://api.telegram.org/bot{bot_token}/sendDocument"
+        timestamp_slug = now_ist.strftime("%Y%m%d_%H%M%S")
+        doc_files = {"document": (f"PnL_Tracker_{timestamp_slug}.png", img_bytes, "image/png")}
+        doc_data = {
+            "chat_id": chat_id,
+            "message_thread_id": topic_id,
+            "caption": "📄 <i>Lossless Ultra-HD Image (Full uncompressed resolution for deep zoom)</i>",
+            "parse_mode": "HTML",
+        }
+        requests.post(doc_url, data=doc_data, files=doc_files, timeout=20)
+
+        if r_photo.status_code == 200:
+            return jsonify({"status": "success", "message": "PnL report dispatched to Telegram Topic #22"}), 200
+        else:
+            logger.error(f"Telegram sendPhoto failed: {r_photo.text}")
+            return jsonify({"status": "error", "message": f"Telegram API error: {r_photo.text}"}), 500
+
+    except Exception as e:
+        logger.exception(f"Error in send_telegram_pnl: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500

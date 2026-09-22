@@ -58,6 +58,7 @@ import { useSupportedExchanges } from '@/hooks/useSupportedExchanges'
 import { cn, makeFormatCurrency, sanitizeCSV } from '@/lib/utils'
 import { useAuthStore } from '@/stores/authStore'
 import { onModeChange } from '@/stores/themeStore'
+import { openChart } from '@/utils/chartUrl'
 import type { Order, OrderStats } from '@/types/trading'
 import { showToast } from '@/utils/toast'
 
@@ -129,19 +130,6 @@ const statusConfig: Record<string, { icon: typeof CheckCircle2; color: string; l
   open: { icon: Clock, color: 'text-blue-500', label: 'open' },
 }
 
-const openChart = (symbol: string, exchange?: string) => {
-  if (!symbol) return;
-  const cleanSymbol = symbol.trim().toUpperCase();
-  const isOption = /(?:CE|PE)$/i.test(cleanSymbol);
-  if (isOption) {
-    const ex = exchange || (cleanSymbol.includes('SENSEX') ? 'BFO' : 'NFO');
-    window.open(`/trading?symbol=${encodeURIComponent(cleanSymbol)}&exchange=${encodeURIComponent(ex)}`, '_blank');
-    return;
-  }
-  const stockSymbol = cleanSymbol.replace('NSE:', '').replace('BSE:', '').replace('NFO:', '');
-  const url = `https://www.tradingview.com/chart/?symbol=NSE:${stockSymbol}`;
-  window.open(url, '_blank');
-};
 
 export default function OrderBook() {
   const { apiKey, user } = useAuthStore()

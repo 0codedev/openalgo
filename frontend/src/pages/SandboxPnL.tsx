@@ -15,6 +15,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn, makeFormatCurrency } from '@/lib/utils'
 import { useAuthStore } from '@/stores/authStore'
+import { openChart } from '@/utils/chartUrl'
 
 interface DailyPnL {
   id?: number
@@ -87,19 +88,6 @@ function getPnLColor(value: number): string {
   return ''
 }
 
-const openChart = (symbol: string, exchange?: string) => {
-  if (!symbol) return;
-  const cleanSymbol = symbol.trim().toUpperCase();
-  const isOption = /(?:CE|PE)$/i.test(cleanSymbol);
-  if (isOption) {
-    const ex = exchange || (cleanSymbol.includes('SENSEX') ? 'BFO' : 'NFO');
-    window.open(`/trading?symbol=${encodeURIComponent(cleanSymbol)}&exchange=${encodeURIComponent(ex)}`, '_blank');
-    return;
-  }
-  const stockSymbol = cleanSymbol.replace('NSE:', '').replace('BSE:', '').replace('NFO:', '');
-  const url = `https://www.tradingview.com/chart/?symbol=NSE:${stockSymbol}`;
-  window.open(url, '_blank');
-};
 
 export default function SandboxPnL() {
   const { user } = useAuthStore()

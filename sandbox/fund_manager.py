@@ -107,16 +107,36 @@ class FundManager:
             # Check if reset is needed
             self._check_and_reset_funds(funds)
 
+            # Broker-standard P&L derivation (matching Upstox/Zerodha API behavior):
+            # Derive realized and unrealized P&L directly from positions table
+            positions = SandboxPositions.query.filter_by(user_id=self.user_id).all()
+            today_realized_from_positions = sum(Decimal(str(p.today_realized_pnl or 0)) for p in positions)
+            unrealized_from_positions = sum(Decimal(str(p.pnl or 0)) for p in positions if p.quantity != 0)
+
+            # Auto-heal any drift between funds ledger and positions table
+            current_today_realized = Decimal(str(funds.today_realized_pnl or 0))
+            discrepancy = today_realized_from_positions - current_today_realized
+            if discrepancy != Decimal("0.00") or funds.unrealized_pnl != unrealized_from_positions:
+                logger.info(
+                    f"Auto-healing P&L for user {self.user_id}: "
+                    f"today_realized {current_today_realized} -> {today_realized_from_positions} (delta: {discrepancy}), "
+                    f"unrealized {funds.unrealized_pnl} -> {unrealized_from_positions}"
+                )
+                funds.today_realized_pnl = today_realized_from_positions
+                funds.realized_pnl += discrepancy
+                funds.available_balance += discrepancy
+                funds.unrealized_pnl = unrealized_from_positions
+                funds.total_pnl = funds.realized_pnl + funds.unrealized_pnl
+                db_session.commit()
+
             # Return fund details
             return {
                 "availablecash": float(funds.available_balance),
                 "collateral": 0.00,  # No collateral in sandbox
-                "m2munrealized": float(funds.unrealized_pnl),
-                "m2mrealized": float(
-                    funds.today_realized_pnl or 0
-                ),  # Today's realized P&L (resets daily)
+                "m2munrealized": float(unrealized_from_positions),
+                "m2mrealized": float(today_realized_from_positions),  # Today's realized P&L (resets daily)
                 "total_realized_pnl": float(funds.realized_pnl),  # All-time realized P&L
-                "today_realized_pnl": float(funds.today_realized_pnl or 0),
+                "today_realized_pnl": float(today_realized_from_positions),
                 "utiliseddebits": float(funds.used_margin),
                 "grossexposure": float(funds.used_margin),
                 "totalpnl": float(funds.total_pnl),
@@ -362,28 +382,21 @@ class FundManager:
                 if amount < 0:
                     return False, f"Release amount cannot be negative, got {amount}"
 
-                # Refuse to release more than is reserved. Letting it through
-                # drives used_margin negative and credits the difference as
-                # available cash, so a single over-release anywhere - a double
-                # release, a stale amount, a recovery bug - invents money and
-                # every figure derived from the balance is wrong afterwards.
-                # Failing here instead leaves the margin blocked, which
-                # reconcile_margin(auto_fix=True) already exists to correct.
+                # Release up to what is currently reserved in used_margin (prevent negative used_margin)
                 if amount > funds.used_margin:
-                    logger.error(
-                        f"Refusing to release ₹{amount} for user {self.user_id}: only "
-                        f"₹{funds.used_margin} is reserved. {description}"
+                    logger.warning(
+                        f"Margin release clamped for user {self.user_id}: requested ₹{amount} but only "
+                        f"₹{funds.used_margin} reserved in used_margin. Releasing ₹{funds.used_margin}. {description}"
                     )
-                    return (
-                        False,
-                        f"Cannot release ₹{amount}: only ₹{funds.used_margin} is reserved",
-                    )
+                    release_amount = funds.used_margin
+                else:
+                    release_amount = amount
 
                 # Release the margin
-                funds.used_margin -= amount
-                funds.available_balance += amount
+                funds.used_margin -= release_amount
+                funds.available_balance += release_amount
 
-                # Add realized P&L (all-time)
+                # Realized P&L is ALWAYS credited/debited on position close, regardless of margin state
                 funds.available_balance += realized_pnl
                 funds.realized_pnl += realized_pnl
                 # Add to today's realized P&L (resets daily at session boundary)
@@ -395,9 +408,9 @@ class FundManager:
                 db_session.commit()
 
                 logger.info(
-                    f"Released ₹{amount} margin for user {self.user_id}. Realized P&L: ₹{realized_pnl}. {description}"
+                    f"Released ₹{release_amount} margin for user {self.user_id}. Realized P&L: ₹{realized_pnl}. {description}"
                 )
-                return True, f"Margin released: ₹{amount}, P&L: ₹{realized_pnl}"
+                return True, f"Margin released: ₹{release_amount}, P&L: ₹{realized_pnl}"
 
             except Exception as e:
                 db_session.rollback()

@@ -10,6 +10,20 @@ export interface Position {
   lot_size?: number // contract_value multiplier (e.g. 0.01 for ETHUSD.P)
   today_realized_pnl?: number // Sandbox: today's realized P&L from closed partial trades
   strategy?: string
+  stop_loss?: {
+    order_id: string
+    trigger_price: number
+    price_type: string
+    quantity?: number
+    status?: string
+  } | null
+  target?: {
+    order_id: string
+    price: number
+    price_type: string
+    quantity?: number
+    status?: string
+  } | null
 }
 
 export interface Order {

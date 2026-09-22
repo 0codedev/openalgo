@@ -22,7 +22,7 @@ import pytz
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from database.sandbox_db import SandboxPositions, SandboxTrades, db_session, get_config
+from database.sandbox_db import SandboxOrders, SandboxPositions, SandboxTrades, db_session, get_config
 from database.token_db import get_symbol_info
 from sandbox.fund_manager import FundManager
 from sandbox.holdings_manager import HoldingsManager
@@ -562,6 +562,20 @@ class PositionManager:
             except Exception:
                 _cv_map = {}
 
+            # Query active pending orders for user to link SL and Target protection to open positions
+            try:
+                pending_orders = (
+                    SandboxOrders.query.filter(
+                        SandboxOrders.user_id == self.user_id,
+                        SandboxOrders.order_status.in_(["open", "trigger pending"]),
+                    )
+                    .order_by(SandboxOrders.order_timestamp.desc())
+                    .all()
+                )
+            except Exception as e:
+                logger.warning(f"Could not load pending orders for position protection: {e}")
+                pending_orders = []
+
             for position in positions:
                 unrealized_pnl = Decimal(str(position.pnl))  # Current unrealized P&L from MTM
                 today_realized = Decimal(str(position.today_realized_pnl or 0))
@@ -595,6 +609,40 @@ class PositionManager:
                     calculated_pnl_percent = Decimal("0.00")
                     display_avg_price = 0.0  # Reset to 0 for display (like Zerodha)
 
+                # Correlate active Stop Loss and Target orders for this position
+                stop_loss_data = None
+                target_data = None
+
+                if position.quantity != 0:
+                    opp_action = "SELL" if position.quantity > 0 else "BUY"
+                    for ord in pending_orders:
+                        if (
+                            ord.symbol == position.symbol
+                            and ord.exchange == position.exchange
+                            and ord.product == position.product
+                            and ord.action == opp_action
+                        ):
+                            # Stop Loss: SL, SL-M, or status trigger pending with a trigger price
+                            if (ord.price_type in ("SL", "SL-M") or ord.order_status == "trigger pending") and ord.trigger_price:
+                                if stop_loss_data is None:
+                                    stop_loss_data = {
+                                        "order_id": ord.orderid,
+                                        "trigger_price": float(ord.trigger_price),
+                                        "price_type": ord.price_type,
+                                        "quantity": ord.quantity,
+                                        "status": ord.order_status,
+                                    }
+                            # Target: LIMIT order open
+                            elif ord.price_type == "LIMIT" and ord.price and ord.order_status == "open":
+                                if target_data is None:
+                                    target_data = {
+                                        "order_id": ord.orderid,
+                                        "price": float(ord.price),
+                                        "price_type": ord.price_type,
+                                        "quantity": ord.quantity,
+                                        "status": ord.order_status,
+                                    }
+
                 positions_list.append(
                     {
                         "symbol": position.symbol,
@@ -612,6 +660,8 @@ class PositionManager:
                         "total_pnl_today": float(position_total_pnl_today),
                         "lot_size": pos_cv,  # contract_value multiplier (e.g. 0.01 for ETHUSD.P)
                         "strategy": getattr(position, "strategy", "") or "",
+                        "stop_loss": stop_loss_data,
+                        "target": target_data,
                     }
                 )
 

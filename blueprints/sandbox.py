@@ -4,6 +4,7 @@ import os
 from datetime import datetime
 
 from flask import Blueprint, Response, flash, jsonify, redirect, render_template, request, session, url_for
+from sqlalchemy import or_
 
 from database.sandbox_db import (
     SandboxFunds,
@@ -576,7 +577,15 @@ def api_my_pnl_data():
         from database.sandbox_db import SandboxDailyPnL
 
         daily_pnl_records = (
-            SandboxDailyPnL.query.filter_by(user_id=user_id)
+            SandboxDailyPnL.query.filter(
+                SandboxDailyPnL.user_id == user_id,
+                or_(
+                    SandboxDailyPnL.realized_pnl != 0,
+                    SandboxDailyPnL.total_mtm != 0,
+                    SandboxDailyPnL.positions_unrealized_pnl != 0,
+                    SandboxDailyPnL.holdings_unrealized_pnl != 0,
+                ),
+            )
             .order_by(SandboxDailyPnL.date.desc())
             .limit(30)
             .all()
@@ -1082,7 +1091,15 @@ def export_daily_pnl():
 
         # Get all daily P&L records for the user (no limit for export)
         daily_pnl_records = (
-            SandboxDailyPnL.query.filter_by(user_id=user_id)
+            SandboxDailyPnL.query.filter(
+                SandboxDailyPnL.user_id == user_id,
+                or_(
+                    SandboxDailyPnL.realized_pnl != 0,
+                    SandboxDailyPnL.total_mtm != 0,
+                    SandboxDailyPnL.positions_unrealized_pnl != 0,
+                    SandboxDailyPnL.holdings_unrealized_pnl != 0,
+                ),
+            )
             .order_by(SandboxDailyPnL.date.desc())
             .all()
         )

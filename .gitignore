@@ -43,6 +43,9 @@ checkpoint.txt
 checkpoints.json
 log/ws_proxy_stats.json
 log/test/
+logs/
+scripts/capture_eod_pnl.js
+scripts/eod_pnl_telegram_publisher.py
 
 
 # Strategy encryption key
