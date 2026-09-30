@@ -347,6 +347,24 @@ class WebSocketExecutionEngine:
         if remaining:
             return
         symbol_key = f"{exchange}:{symbol}"
+
+        # Keep subscription warm during market hours (< 15:35 IST on weekdays)
+        # so live LTP continues updating for post-trade counterfactual ("What-If") tracking
+        try:
+            from datetime import datetime
+            import pytz
+            ist = pytz.timezone("Asia/Kolkata")
+            now_ist = datetime.now(ist)
+            is_market_active = (now_ist.weekday() < 5) and (
+                (now_ist.hour > 9 or (now_ist.hour == 9 and now_ist.minute >= 0))
+                and (now_ist.hour < 15 or (now_ist.hour == 15 and now_ist.minute <= 35))
+            )
+            if is_market_active:
+                logger.info(f"Position feed: keeping {symbol_key} subscribed for counterfactual MTM during market hours")
+                return
+        except Exception as e:
+            logger.debug(f"Position feed: market hours check skipped: {e}")
+
         unsubscribe = False
         with self._lock:
             if (user_id, symbol_key) in self._position_refs:

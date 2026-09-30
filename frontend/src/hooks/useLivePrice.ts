@@ -18,6 +18,13 @@ export interface PriceableItem {
   average_price?: number
   today_realized_pnl?: number // Sandbox: today's realized P&L from closed partial trades
   lot_size?: number // Contract multiplier (e.g. 0.01 for Delta Exchange ETHUSD.P)
+  entry_price?: number
+  exit_price?: number
+  closed_qty?: number
+  realized_pnl_percent?: number
+  counterfactual_pnl?: number
+  left_on_table?: number
+  counterfactual_status?: 'left_on_table' | 'saved_loss' | 'neutral' | 'open'
 }
 
 /**
@@ -253,11 +260,37 @@ export function useLivePrice<T extends PriceableItem>(
       // at all -- a watchlist row, say. Those must still take live prices, and
       // `item.quantity || 0` reads the same 0 for both cases.
       if (item.quantity !== undefined && qty === 0) {
+        // For closed positions: update live LTP for post-trade counterfactual tracking,
+        // while strictly preserving locked realized P&L from REST API!
+        const liveLtp = currentLtp || item.ltp
+        let updatedLeftOnTable = item.left_on_table
+        let updatedCounterfactualPnl = item.counterfactual_pnl
+        let updatedStatus = item.counterfactual_status
+
+        if (liveLtp && item.exit_price && item.closed_qty) {
+          const lotSize = item.lot_size ?? 1
+          if (item.entry_price) {
+            // Delta from exit price: if current price is higher than exit, money was left on the table
+            const exitDelta = (liveLtp - item.exit_price) * item.closed_qty * lotSize
+            updatedLeftOnTable = Math.round(exitDelta * 100) / 100
+            updatedCounterfactualPnl = Math.round((liveLtp - item.entry_price) * item.closed_qty * lotSize * 100) / 100
+            if (exitDelta > 0.01) {
+              updatedStatus = 'left_on_table'
+            } else if (exitDelta < -0.01) {
+              updatedStatus = 'saved_loss'
+            } else {
+              updatedStatus = 'neutral'
+            }
+          }
+        }
+
         return {
           ...item,
-          // Keep item.ltp from REST API - don't update with live data
-          // This prevents P&L% from recalculating with changing LTP
-          _dataSource: 'rest',
+          ltp: liveLtp,
+          left_on_table: updatedLeftOnTable,
+          counterfactual_pnl: updatedCounterfactualPnl,
+          counterfactual_status: updatedStatus,
+          _dataSource: dataSource,
         } as T & { _dataSource: string }
       }
 

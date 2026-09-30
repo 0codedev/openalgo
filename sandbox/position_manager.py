@@ -576,6 +576,22 @@ class PositionManager:
                 logger.warning(f"Could not load pending orders for position protection: {e}")
                 pending_orders = []
 
+            # Preload user's trades for today to compute trade execution history and counterfactuals
+            trades_by_key = {}
+            try:
+                user_trades = (
+                    SandboxTrades.query.filter(SandboxTrades.user_id == self.user_id)
+                    .order_by(SandboxTrades.trade_timestamp.asc())
+                    .all()
+                )
+                for t in user_trades:
+                    key = (t.symbol, t.exchange, t.product)
+                    if key not in trades_by_key:
+                        trades_by_key[key] = []
+                    trades_by_key[key].append(t)
+            except Exception as e:
+                logger.warning(f"Could not load trades for post-trade analysis: {e}")
+
             for position in positions:
                 unrealized_pnl = Decimal(str(position.pnl))  # Current unrealized P&L from MTM
                 today_realized = Decimal(str(position.today_realized_pnl or 0))
@@ -594,7 +610,7 @@ class PositionManager:
 
                 # Calculate P&L% based on total P&L (realized + unrealized) for the day
                 # For open positions: % based on total investment
-                # For closed positions (qty=0): 0% (like Zerodha - avg resets to 0, can't calculate)
+                # For closed positions (qty=0): standard resets to 0% (like Zerodha), enhanced telemetry computed below
                 pos_cv = _cv_map.get(position.symbol, 1.0)
                 pos_cv_dec = Decimal(str(pos_cv))
                 if position.quantity != 0:
@@ -604,10 +620,64 @@ class PositionManager:
                     else:
                         calculated_pnl_percent = Decimal("0.00")
                     display_avg_price = float(position.average_price)
+                    entry_price = float(position.average_price)
+                    exit_price = 0.0
+                    closed_qty = 0
+                    realized_pnl_percent = float(calculated_pnl_percent)
+                    counterfactual_pnl = 0.0
+                    left_on_table = 0.0
+                    counterfactual_status = "open"
                 else:
-                    # Closed position - show 0% and avg=0 (like Zerodha)
+                    # Closed position - standard view shows 0% and avg=0 (like Zerodha)
                     calculated_pnl_percent = Decimal("0.00")
-                    display_avg_price = 0.0  # Reset to 0 for display (like Zerodha)
+                    display_avg_price = 0.0
+
+                    # Compute Enhanced Post-Trade Telemetry from executed trades
+                    pos_trades = trades_by_key.get((position.symbol, position.exchange, position.product), [])
+                    entry_price = float(position.average_price or 0.0)
+                    exit_price = 0.0
+                    closed_qty = 0
+                    realized_pnl_percent = 0.0
+                    counterfactual_pnl = 0.0
+                    left_on_table = 0.0
+                    counterfactual_status = "neutral"
+
+                    if pos_trades:
+                        buy_trades = [t for t in pos_trades if t.action == "BUY"]
+                        sell_trades = [t for t in pos_trades if t.action == "SELL"]
+                        tot_buy_qty = sum(t.quantity for t in buy_trades)
+                        tot_sell_qty = sum(t.quantity for t in sell_trades)
+                        buy_val = sum(t.quantity * float(t.price) for t in buy_trades)
+                        sell_val = sum(t.quantity * float(t.price) for t in sell_trades)
+                        avg_buy = (buy_val / tot_buy_qty) if tot_buy_qty > 0 else 0.0
+                        avg_sell = (sell_val / tot_sell_qty) if tot_sell_qty > 0 else 0.0
+
+                        closed_qty = min(tot_buy_qty, tot_sell_qty) if (tot_buy_qty > 0 and tot_sell_qty > 0) else max(tot_buy_qty, tot_sell_qty)
+                        is_long_initial = (pos_trades[0].action == "BUY") if pos_trades else True
+
+                        if is_long_initial:
+                            entry_price = avg_buy if avg_buy > 0 else float(position.average_price or 0.0)
+                            exit_price = avg_sell
+                            if entry_price > 0:
+                                realized_pnl_percent = ((exit_price - entry_price) / entry_price) * 100.0
+                            curr_ltp = float(position.ltp or exit_price)
+                            counterfactual_pnl = (curr_ltp - entry_price) * closed_qty * float(pos_cv)
+                            left_on_table = (curr_ltp - exit_price) * closed_qty * float(pos_cv)
+                        else:
+                            entry_price = avg_sell if avg_sell > 0 else float(position.average_price or 0.0)
+                            exit_price = avg_buy
+                            if entry_price > 0:
+                                realized_pnl_percent = ((entry_price - exit_price) / entry_price) * 100.0
+                            curr_ltp = float(position.ltp or exit_price)
+                            counterfactual_pnl = (entry_price - curr_ltp) * closed_qty * float(pos_cv)
+                            left_on_table = (exit_price - curr_ltp) * closed_qty * float(pos_cv)
+
+                        if left_on_table > 0.01:
+                            counterfactual_status = "left_on_table"
+                        elif left_on_table < -0.01:
+                            counterfactual_status = "saved_loss"
+                        else:
+                            counterfactual_status = "neutral"
 
                 # Correlate active Stop Loss and Target orders for this position
                 stop_loss_data = None
@@ -662,6 +732,14 @@ class PositionManager:
                         "strategy": getattr(position, "strategy", "") or "",
                         "stop_loss": stop_loss_data,
                         "target": target_data,
+                        # Enhanced Post-Trade Telemetry
+                        "entry_price": round(float(entry_price), 2),
+                        "exit_price": round(float(exit_price), 2),
+                        "closed_qty": int(closed_qty),
+                        "realized_pnl_percent": round(float(realized_pnl_percent), 2),
+                        "counterfactual_pnl": round(float(counterfactual_pnl), 2),
+                        "left_on_table": round(float(left_on_table), 2),
+                        "counterfactual_status": counterfactual_status,
                     }
                 )
 
@@ -735,11 +813,10 @@ class PositionManager:
             if not positions:
                 return
 
-            # Get unique symbols
+            # Get unique symbols (include today's closed positions for live counterfactual MTM)
             symbols_to_fetch = set()
             for position in positions:
-                if position.quantity != 0:  # Only fetch for open positions
-                    symbols_to_fetch.add((position.symbol, position.exchange))
+                symbols_to_fetch.add((position.symbol, position.exchange))
 
             if not symbols_to_fetch:
                 return
@@ -774,17 +851,20 @@ class PositionManager:
 
             # Update MTM for each position
             for position in positions:
-                # Skip MTM update for closed positions (quantity = 0)
-                # They already have today's realized P&L stored in position.pnl
-                if position.quantity == 0:
-                    continue
-
                 quote = quote_cache.get((position.symbol, position.exchange))
                 if quote:
                     ltp = Decimal(str(quote.get("ltp", 0)))
                     if ltp > 0:
                         position.ltp = ltp
 
+                # Skip unrealized P&L recalculation for closed positions (quantity = 0)
+                # Their today_realized_pnl is already locked in, but ltp is kept fresh above
+                if position.quantity == 0:
+                    continue
+
+                if quote:
+                    ltp = Decimal(str(quote.get("ltp", 0)))
+                    if ltp > 0:
                         # Calculate current unrealized P&L for open position
                         cv = self._get_contract_value(position.symbol, position.exchange)
                         current_unrealized_pnl = self._calculate_position_pnl(

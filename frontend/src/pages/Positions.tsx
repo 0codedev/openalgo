@@ -16,6 +16,8 @@ import {
   ExternalLink,
   Eye,
   EyeOff,
+  Activity,
+  ChevronUp,
 } from 'lucide-react'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { tradingApi } from '@/api/trading'
@@ -106,13 +108,17 @@ function parseSymbol(symbol: string, exchange: string) {
   return { underlying: symbol, expiry: null, strike: null, optionType: null }
 }
 
-function calculatePnlPercent(position: Position): number {
+function calculatePnlPercent(position: Position, enhanced = false): number {
+  if (enhanced && position.quantity === 0 && position.realized_pnl_percent !== undefined) {
+    return Number(position.realized_pnl_percent) || 0
+  }
+
   const avgPrice = Number(position.average_price) || 0
   const qty = Number(position.quantity) || 0
   const pnl = Number(position.pnl) || 0
 
-  // Use API-provided pnlpercent if available
-  if (position.pnlpercent !== undefined && position.pnlpercent !== null) {
+  // Use API-provided pnlpercent if available (for open positions)
+  if (position.pnlpercent !== undefined && position.pnlpercent !== null && qty !== 0) {
     return Number(position.pnlpercent) || 0
   }
 
@@ -124,9 +130,7 @@ function calculatePnlPercent(position: Position): number {
     return investment > 0 ? (pnl / investment) * 100 : 0
   }
 
-  // For closed positions (qty=0), return 0% like Zerodha
-  // We cannot reliably calculate P&L% without knowing the original quantity
-  // The P&L amount is still shown correctly from the API
+  // For closed positions (qty=0), return 0% like Zerodha standard
   return 0
 }
 
@@ -177,8 +181,26 @@ export default function Positions() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [hideClosed, setHideClosed] = useState<boolean>(() => {
     const saved = localStorage.getItem('openalgo_positions_hide_closed')
-    return saved !== null ? saved === 'true' : true
+    return saved !== null ? saved === 'true' : false // default to false so closed positions are visible
   })
+  const [isEnhancedView, setIsEnhancedView] = useState<boolean>(() => {
+    const saved = localStorage.getItem('openalgo_positions_enhanced_view')
+    return saved !== null ? saved === 'true' : true // default to true for rich post-trade insights, easily toggled off
+  })
+  const [expandedPositionKeys, setExpandedPositionKeys] = useState<Set<string>>(new Set())
+
+  const toggleExpandPosition = (key: string) => {
+    setExpandedPositionKeys((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) {
+        next.delete(key)
+      } else {
+        next.add(key)
+      }
+      return next
+    })
+  }
+
   const [protectionModal, setProtectionModal] = useState<{
     open: boolean
     position: Position | null
@@ -804,6 +826,30 @@ export default function Positions() {
             </Button>
           )}
 
+          <Button
+            variant="outline"
+            size="sm"
+            className={cn(
+              'transition-colors font-medium',
+              isEnhancedView
+                ? 'text-indigo-400 bg-indigo-500/10 border-indigo-500/30 hover:bg-indigo-500/20 shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            )}
+            onClick={() => {
+              const next = !isEnhancedView
+              setIsEnhancedView(next)
+              localStorage.setItem('openalgo_positions_enhanced_view', String(next))
+            }}
+            title={
+              isEnhancedView
+                ? 'Intelligence View active (Click to hide tweaks and restore standard static view)'
+                : 'Standard view active (Click to enable post-trade intelligence and counterfactual analytics)'
+            }
+          >
+            <Activity className={cn('h-4 w-4 mr-2', isEnhancedView && 'text-indigo-400')} />
+            {isEnhancedView ? 'Intelligence View (On)' : 'Standard View'}
+          </Button>
+
           <Button variant="outline" size="sm" onClick={exportToCSV}>
             <Download className="h-4 w-4 mr-2" />
             Export
@@ -1006,159 +1052,293 @@ export default function Positions() {
 
                         {/* Position Rows */}
                         {!isCollapsed &&
-                          groupPositions.map((position, index) => (
-                            <TableRow key={`${position.symbol}-${position.exchange}-${index}`} className="group">
-                              <TableCell className="w-[140px] font-medium">
-                                <button
-                                  onClick={() => openChart(position.symbol, position.exchange)}
-                                  className="hover:text-indigo-500 font-medium transition-colors flex items-center gap-1.5 text-left"
-                                  title="Open Chart"
-                                >
-                                  {position.symbol}
-                                  <ExternalLink size={12} className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground" />
-                                </button>
-                              </TableCell>
-                              <TableCell className="w-[80px]">
-                                <Badge
-                                  variant="outline"
-                                  className={EXCHANGE_COLORS[position.exchange] || ''}
-                                >
-                                  {position.exchange}
-                                </Badge>
-                              </TableCell>
-                              {!isCrypto && (
-                                <TableCell className="w-[80px]">
-                                  <Badge
-                                    variant="outline"
-                                    className={PRODUCT_COLORS[position.product] || ''}
-                                  >
-                                    {position.product}
-                                  </Badge>
-                                </TableCell>
-                              )}
-                              <TableCell className="w-[120px]">
-                                {position.strategy ? (
-                                  <Badge
-                                    variant="secondary"
-                                    className="font-mono text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 max-w-[130px] truncate"
-                                    title={position.strategy}
-                                  >
-                                    {position.strategy}
-                                  </Badge>
-                                ) : (
-                                  <span className="text-muted-foreground text-xs">-</span>
-                                )}
-                              </TableCell>
-                              <TableCell
-                                className={cn(
-                                  'w-[80px] text-right font-medium',
-                                  position.quantity === 0
-                                    ? 'text-muted-foreground'
-                                    : position.quantity > 0
-                                      ? 'text-green-600'
-                                      : 'text-red-600'
-                                )}
-                              >
-                                {position.quantity}
-                              </TableCell>
-                              <TableCell className="w-[110px] text-right font-mono">
-                                {formatCurrency(position.average_price)}
-                              </TableCell>
-                              <TableCell className="w-[110px] text-right font-mono">
-                                {position.ltp !== undefined ? formatCurrency(position.ltp) : '-'}
-                              </TableCell>
+                          groupPositions.map((position, index) => {
+                            const rowKey = `${position.symbol}-${position.exchange}-${position.product}-${index}`
+                            const isExpanded = expandedPositionKeys.has(rowKey)
 
-                              {/* Stop Loss Cell */}
-                              <TableCell className="w-[110px] text-center">
-                                {position.quantity === 0 ? (
-                                  <span className="text-muted-foreground text-xs">-</span>
-                                ) : position.stop_loss ? (
-                                  <Badge
-                                    variant="outline"
-                                    className="bg-amber-500/10 text-amber-500 hover:bg-amber-500/20 border-amber-500/30 font-mono text-xs cursor-pointer transition-colors"
-                                    onClick={() => handleOpenProtection(position, 'SL')}
-                                    title={`Click to edit Stop Loss. Order ID: ${position.stop_loss.order_id} (${position.stop_loss.price_type})`}
-                                  >
-                                    ₹{Number(position.stop_loss.trigger_price).toFixed(2)}
-                                  </Badge>
-                                ) : (
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className="h-6 px-2 text-[11px] text-amber-500/80 hover:text-amber-400 hover:bg-amber-500/10 border border-dashed border-amber-500/30 rounded"
-                                    onClick={() => handleOpenProtection(position, 'SL')}
-                                  >
-                                    + Set SL
-                                  </Button>
-                                )}
-                              </TableCell>
-
-                              {/* Target Cell */}
-                              <TableCell className="w-[110px] text-center">
-                                {position.quantity === 0 ? (
-                                  <span className="text-muted-foreground text-xs">-</span>
-                                ) : position.target ? (
-                                  <Badge
-                                    variant="outline"
-                                    className="bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 border-emerald-500/30 font-mono text-xs cursor-pointer transition-colors"
-                                    onClick={() => handleOpenProtection(position, 'TARGET')}
-                                    title={`Click to edit Target. Order ID: ${position.target.order_id}`}
-                                  >
-                                    ₹{Number(position.target.price).toFixed(2)}
-                                  </Badge>
-                                ) : (
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className="h-6 px-2 text-[11px] text-emerald-500/80 hover:text-emerald-400 hover:bg-emerald-500/10 border border-dashed border-emerald-500/30 rounded"
-                                    onClick={() => handleOpenProtection(position, 'TARGET')}
-                                  >
-                                    + Set TGT
-                                  </Button>
-                                )}
-                              </TableCell>
-
-                              <TableCell
-                                className={cn(
-                                  'w-[120px] text-right font-medium',
-                                  isProfit(position.pnl) ? 'text-green-600' : 'text-red-600'
-                                )}
-                              >
-                                <div className="flex items-center justify-end gap-1">
-                                  {isProfit(position.pnl) ? (
-                                    <TrendingUp className="h-4 w-4" />
-                                  ) : (
-                                    <TrendingDown className="h-4 w-4" />
+                            return (
+                              <React.Fragment key={rowKey}>
+                                <TableRow className="group">
+                                  <TableCell className="w-[140px] font-medium">
+                                    <button
+                                      onClick={() => openChart(position.symbol, position.exchange)}
+                                      className="hover:text-indigo-500 font-medium transition-colors flex items-center gap-1.5 text-left"
+                                      title="Open Chart"
+                                    >
+                                      {position.symbol}
+                                      <ExternalLink size={12} className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground" />
+                                    </button>
+                                  </TableCell>
+                                  <TableCell className="w-[80px]">
+                                    <Badge
+                                      variant="outline"
+                                      className={EXCHANGE_COLORS[position.exchange] || ''}
+                                    >
+                                      {position.exchange}
+                                    </Badge>
+                                  </TableCell>
+                                  {!isCrypto && (
+                                    <TableCell className="w-[80px]">
+                                      <Badge
+                                        variant="outline"
+                                        className={PRODUCT_COLORS[position.product] || ''}
+                                      >
+                                        {position.product}
+                                      </Badge>
+                                    </TableCell>
                                   )}
-                                  {formatCurrency(position.pnl)}
-                                </div>
-                              </TableCell>
-                              <TableCell
-                                className={cn(
-                                  'w-[90px] text-right',
-                                  isProfit(calculatePnlPercent(position))
-                                    ? 'text-green-600'
-                                    : 'text-red-600'
-                                )}
-                              >
-                                {calculatePnlPercent(position) >= 0 ? '+' : ''}
-                                {calculatePnlPercent(position).toFixed(2)}%
-                              </TableCell>
-                              <TableCell className="w-[60px] text-right">
-                                {position.quantity !== 0 && (
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                                    onClick={() => handleClosePosition(position)}
-                                    aria-label={`Close ${position.symbol} position`}
+                                  <TableCell className="w-[120px]">
+                                    {position.strategy ? (
+                                      <Badge
+                                        variant="secondary"
+                                        className="font-mono text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 max-w-[130px] truncate"
+                                        title={position.strategy}
+                                      >
+                                        {position.strategy}
+                                      </Badge>
+                                    ) : (
+                                      <span className="text-muted-foreground text-xs">-</span>
+                                    )}
+                                  </TableCell>
+                                  <TableCell
+                                    className={cn(
+                                      'w-[80px] text-right font-medium',
+                                      position.quantity === 0
+                                        ? 'text-muted-foreground'
+                                        : position.quantity > 0
+                                          ? 'text-green-600'
+                                          : 'text-red-600'
+                                    )}
                                   >
-                                    <X className="h-4 w-4" />
-                                  </Button>
+                                    {isEnhancedView && position.quantity === 0 && position.closed_qty ? (
+                                      <div className="flex flex-col items-end leading-tight">
+                                        <span className="font-mono text-muted-foreground">0</span>
+                                        <span className="text-[10px] text-muted-foreground/70 font-mono tracking-tight">
+                                          Traded: {position.closed_qty}
+                                        </span>
+                                      </div>
+                                    ) : (
+                                      position.quantity
+                                    )}
+                                  </TableCell>
+                                  <TableCell className="w-[110px] text-right font-mono">
+                                    {isEnhancedView && position.quantity === 0 && position.entry_price ? (
+                                      <div className="flex flex-col items-end leading-tight">
+                                        <div className="flex items-center gap-1 text-[11px] font-mono">
+                                          <span className="text-muted-foreground">₹{position.entry_price.toFixed(2)}</span>
+                                          <span className="text-muted-foreground/40">→</span>
+                                          <span className="text-foreground font-medium">₹{(position.exit_price || 0).toFixed(2)}</span>
+                                        </div>
+                                        <span className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Entry → Exit</span>
+                                      </div>
+                                    ) : (
+                                      formatCurrency(position.average_price)
+                                    )}
+                                  </TableCell>
+                                  <TableCell className="w-[110px] text-right font-mono">
+                                    {position.ltp !== undefined ? (
+                                      <div className="flex flex-col items-end leading-tight">
+                                        <span className="font-mono">{formatCurrency(position.ltp)}</span>
+                                        {isEnhancedView && position.quantity === 0 && position.left_on_table !== undefined && position.left_on_table !== 0 ? (
+                                          <span
+                                            className={cn(
+                                              'text-[10px] font-mono flex items-center gap-0.5 mt-0.5 font-medium',
+                                              position.left_on_table > 0
+                                                ? 'text-amber-400/90'
+                                                : 'text-emerald-400/90'
+                                            )}
+                                            title={
+                                              position.left_on_table > 0
+                                                ? `Left on Table: Price continued favorably after exit. Potential uncaptured gain: ₹${Math.abs(position.left_on_table).toFixed(2)}`
+                                                : `Capital Preserved: Price deteriorated after exit. Loss avoided by exiting: ₹${Math.abs(position.left_on_table).toFixed(2)}`
+                                            }
+                                          >
+                                            {position.left_on_table > 0 ? (
+                                              <>+{formatCurrency(position.left_on_table)} left</>
+                                            ) : (
+                                              <>+{formatCurrency(Math.abs(position.left_on_table))} saved</>
+                                            )}
+                                          </span>
+                                        ) : null}
+                                      </div>
+                                    ) : (
+                                      '-'
+                                    )}
+                                  </TableCell>
+
+                                  {/* Stop Loss Cell */}
+                                  <TableCell className="w-[110px] text-center">
+                                    {position.quantity === 0 ? (
+                                      <span className="text-muted-foreground text-xs">-</span>
+                                    ) : position.stop_loss ? (
+                                      <Badge
+                                        variant="outline"
+                                        className="bg-amber-500/10 text-amber-500 hover:bg-amber-500/20 border-amber-500/30 font-mono text-xs cursor-pointer transition-colors"
+                                        onClick={() => handleOpenProtection(position, 'SL')}
+                                        title={`Click to edit Stop Loss. Order ID: ${position.stop_loss.order_id} (${position.stop_loss.price_type})`}
+                                      >
+                                        ₹{Number(position.stop_loss.trigger_price).toFixed(2)}
+                                      </Badge>
+                                    ) : (
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-6 px-2 text-[11px] text-amber-500/80 hover:text-amber-400 hover:bg-amber-500/10 border border-dashed border-amber-500/30 rounded"
+                                        onClick={() => handleOpenProtection(position, 'SL')}
+                                      >
+                                        + Set SL
+                                      </Button>
+                                    )}
+                                  </TableCell>
+
+                                  {/* Target Cell */}
+                                  <TableCell className="w-[110px] text-center">
+                                    {position.quantity === 0 ? (
+                                      <span className="text-muted-foreground text-xs">-</span>
+                                    ) : position.target ? (
+                                      <Badge
+                                        variant="outline"
+                                        className="bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 border-emerald-500/30 font-mono text-xs cursor-pointer transition-colors"
+                                        onClick={() => handleOpenProtection(position, 'TARGET')}
+                                        title={`Click to edit Target. Order ID: ${position.target.order_id}`}
+                                      >
+                                        ₹{Number(position.target.price).toFixed(2)}
+                                      </Badge>
+                                    ) : (
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-6 px-2 text-[11px] text-emerald-500/80 hover:text-emerald-400 hover:bg-emerald-500/10 border border-dashed border-emerald-500/30 rounded"
+                                        onClick={() => handleOpenProtection(position, 'TARGET')}
+                                      >
+                                        + Set TGT
+                                      </Button>
+                                    )}
+                                  </TableCell>
+
+                                  <TableCell
+                                    className={cn(
+                                      'w-[120px] text-right font-medium',
+                                      isProfit(position.pnl) ? 'text-green-600' : 'text-red-600'
+                                    )}
+                                  >
+                                    <div className="flex items-center justify-end gap-1">
+                                      {isProfit(position.pnl) ? (
+                                        <TrendingUp className="h-4 w-4" />
+                                      ) : (
+                                        <TrendingDown className="h-4 w-4" />
+                                      )}
+                                      {formatCurrency(position.pnl)}
+                                    </div>
+                                  </TableCell>
+                                  <TableCell
+                                    className={cn(
+                                      'w-[90px] text-right',
+                                      isProfit(calculatePnlPercent(position, isEnhancedView))
+                                        ? 'text-green-600'
+                                        : 'text-red-600'
+                                    )}
+                                  >
+                                    {isEnhancedView && position.quantity === 0 && position.realized_pnl_percent !== undefined ? (
+                                      <div className="flex flex-col items-end leading-tight">
+                                        <span className="font-mono font-medium">
+                                          {position.realized_pnl_percent >= 0 ? '+' : ''}
+                                          {position.realized_pnl_percent.toFixed(2)}%
+                                        </span>
+                                        <span className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Realized</span>
+                                      </div>
+                                    ) : (
+                                      <>
+                                        {calculatePnlPercent(position, isEnhancedView) >= 0 ? '+' : ''}
+                                        {calculatePnlPercent(position, isEnhancedView).toFixed(2)}%
+                                      </>
+                                    )}
+                                  </TableCell>
+                                  <TableCell className="w-[60px] text-right">
+                                    {position.quantity !== 0 ? (
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                                        onClick={() => handleClosePosition(position)}
+                                        aria-label={`Close ${position.symbol} position`}
+                                      >
+                                        <X className="h-4 w-4" />
+                                      </Button>
+                                    ) : isEnhancedView && position.entry_price ? (
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-7 w-7 p-0 text-muted-foreground hover:text-indigo-400 hover:bg-indigo-500/10"
+                                        onClick={() => toggleExpandPosition(rowKey)}
+                                        title={isExpanded ? 'Collapse post-trade details' : 'Expand post-trade details'}
+                                      >
+                                        {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                                      </Button>
+                                    ) : null}
+                                  </TableCell>
+                                </TableRow>
+
+                                {/* Expandable Post-Trade Intelligence Drawer */}
+                                {isExpanded && isEnhancedView && position.quantity === 0 && (
+                                  <TableRow className="bg-muted/10 border-b border-border/40 hover:bg-muted/15 transition-colors">
+                                    <TableCell colSpan={isCrypto ? 9 : 10} className="p-3">
+                                      <div className="p-3.5 rounded-lg bg-card/80 border border-indigo-500/20 text-xs flex flex-wrap items-center justify-between gap-4 font-mono shadow-sm">
+                                        <div className="flex items-center gap-6">
+                                          <div>
+                                            <span className="text-muted-foreground uppercase text-[10px] block">Entry Avg</span>
+                                            <span className="text-foreground font-semibold">₹{(position.entry_price || 0).toFixed(2)}</span>
+                                          </div>
+                                          <div>
+                                            <span className="text-muted-foreground uppercase text-[10px] block">Exit Avg</span>
+                                            <span className="text-foreground font-semibold">₹{(position.exit_price || 0).toFixed(2)}</span>
+                                          </div>
+                                          <div>
+                                            <span className="text-muted-foreground uppercase text-[10px] block">Closed Qty</span>
+                                            <span className="text-foreground font-semibold">{position.closed_qty || '-'}</span>
+                                          </div>
+                                          <div>
+                                            <span className="text-muted-foreground uppercase text-[10px] block">Realized Return</span>
+                                            <span className={cn('font-semibold', isProfit(position.realized_pnl_percent || 0) ? 'text-green-500' : 'text-red-500')}>
+                                              {(position.realized_pnl_percent || 0) >= 0 ? '+' : ''}{(position.realized_pnl_percent || 0).toFixed(2)}%
+                                            </span>
+                                          </div>
+                                        </div>
+                                        <div className="flex items-center gap-6">
+                                          <div>
+                                            <span className="text-muted-foreground uppercase text-[10px] block">Current Live LTP</span>
+                                            <span className="text-foreground font-semibold">₹{(position.ltp || 0).toFixed(2)}</span>
+                                          </div>
+                                          <div>
+                                            <span className="text-muted-foreground uppercase text-[10px] block">Counterfactual (If Held)</span>
+                                            <span className={cn('font-semibold', isProfit(position.counterfactual_pnl || 0) ? 'text-green-500' : 'text-red-500')}>
+                                              {(position.counterfactual_pnl || 0) >= 0 ? '+' : ''}₹{(position.counterfactual_pnl || 0).toFixed(2)}
+                                            </span>
+                                          </div>
+                                          <div>
+                                            <span className="text-muted-foreground uppercase text-[10px] block">Exit Alpha</span>
+                                            <Badge
+                                              variant="outline"
+                                              className={cn(
+                                                'font-mono text-xs',
+                                                (position.left_on_table || 0) > 0
+                                                  ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+                                                  : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                                              )}
+                                            >
+                                              {(position.left_on_table || 0) > 0
+                                                ? `+₹${Math.abs(position.left_on_table || 0).toFixed(2)} Left on Table`
+                                                : `+₹${Math.abs(position.left_on_table || 0).toFixed(2)} Capital Preserved`}
+                                            </Badge>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    </TableCell>
+                                  </TableRow>
                                 )}
-                              </TableCell>
-                            </TableRow>
-                          ))}
+                              </React.Fragment>
+                            )
+                          })}
                       </React.Fragment>
                     )
                   })}

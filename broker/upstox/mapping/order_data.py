@@ -235,6 +235,22 @@ def transform_positions_data(positions_data):
         # Final conversion to float, handling None
         average_price = float(avg_price) if avg_price is not None else 0.0
 
+        # Preserve entry, exit, and closed quantity for post-trade intelligence
+        buy_p = float(position.get("buy_price") or position.get("day_buy_price") or 0.0)
+        sell_p = float(position.get("sell_price") or position.get("day_sell_price") or 0.0)
+        buy_q = int(position.get("buy_quantity") or position.get("day_buy_quantity") or 0)
+        sell_q = int(position.get("sell_quantity") or position.get("day_sell_quantity") or 0)
+        closed_q = min(buy_q, sell_q) if (buy_q > 0 and sell_q > 0) else max(buy_q, sell_q)
+
+        entry_p = buy_p if buy_p > 0 else sell_p
+        exit_p = sell_p if buy_p > 0 else buy_p
+        realized_pct = 0.0
+        pnl_val = float(position.get("pnl") or position.get("realized_pnl") or 0.0)
+        if entry_p > 0 and closed_q > 0:
+            investment = entry_p * closed_q
+            if investment > 0:
+                realized_pct = (pnl_val / investment) * 100.0
+
         transformed_position = {
             "symbol": position.get("tradingsymbol", ""),
             "exchange": position.get("exchange", ""),
@@ -243,6 +259,10 @@ def transform_positions_data(positions_data):
             "average_price": average_price,
             "pnl": position.get("pnl", 0.0),
             "ltp": position.get("last_price", 0.0),
+            "entry_price": round(entry_p, 2),
+            "exit_price": round(exit_p, 2),
+            "closed_qty": closed_q,
+            "realized_pnl_percent": round(realized_pct, 2),
         }
         transformed_data.append(transformed_position)
     return transformed_data

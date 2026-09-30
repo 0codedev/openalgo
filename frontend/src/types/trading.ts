@@ -24,6 +24,14 @@ export interface Position {
     quantity?: number
     status?: string
   } | null
+  // Enhanced Post-Trade & Counterfactual Telemetry
+  entry_price?: number
+  exit_price?: number
+  closed_qty?: number
+  realized_pnl_percent?: number
+  counterfactual_pnl?: number
+  left_on_table?: number
+  counterfactual_status?: 'left_on_table' | 'saved_loss' | 'neutral' | 'open'
 }
 
 export interface Order {
