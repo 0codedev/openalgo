@@ -137,11 +137,14 @@ class StandInRun:
 
 
 class StandInIntent:
-    def __init__(self, intent_id, kind="place", side="buy", qty=1.0, tag=""):
+    def __init__(self, intent_id, kind="place", side="buy", qty=1.0, tag="", qty_type="units"):
         self.intent_id = intent_id
         self.kind = kind
         self.side = side
         self.qty = qty
+        # The unit the quantity is counted in, which an engine intent always
+        # states (``host-interface.md`` 7.1).
+        self.qty_type = qty_type
         self.placement = types.SimpleNamespace(
             kind=kind, order_type="market", limit=None, trigger=None, tag=tag
         )
@@ -224,7 +227,18 @@ def stand_in_engine(raw, ledger=None, effects_at=None):
         capabilities=lambda *tags: ("core.1",) + tags,
         utc_time=None,
         session_facts=("session.isFirstBar",),
+        session_first="isSessionFirst",
         readable_zone=READABLE_ZONE,
+        # The one zone a stand-in reads a clock in. The real engine reads every
+        # zone this server's database holds once the host's reader is in place,
+        # and the tests of that run against the real one.
+        knows_zone=lambda zone: zone == READABLE_ZONE,
+        reads_calendar_in=lambda zone: zone == READABLE_ZONE,
+        time_reader=lambda zone: None,
+        join_calendar=lambda serving: True,
+        session_hours=lambda zone, window: window,
+        opening_day=lambda hours, time_ms, zone: None,
+        day_of=lambda text: None,
         # The set the engine keeps of every library call that reads a calendar.
         # A driver that carried its own copy of this list would go stale the day
         # the language gained a call, so it asks the engine, and so does this.
@@ -1002,8 +1016,13 @@ class _Answering:
         return answer
 
 
-def _routing_session(modes):
-    """A Session with only the parts ``_route`` touches, and a stated destination."""
+def _routing_session(modes, holding=0.0):
+    """A Session with only the parts ``_route`` touches, and a stated destination.
+
+    ``holding`` is this run's net position, which is what decides whether a
+    changed destination is dangerous. A run holding nothing has nothing open at
+    the earlier destination; one holding something has its entry there.
+    """
     session = object.__new__(runner.Session)
     session.client = _Answering(modes)
     session.options = types.SimpleNamespace(
@@ -1014,6 +1033,7 @@ def _routing_session(modes):
     session._orders = {}
     session._open = set()
     session._destination = None
+    session.ledger = types.SimpleNamespace(size=lambda: holding)
     return session
 
 
@@ -1023,6 +1043,7 @@ def _an_order(intent_id=1, side="buy"):
         intent_id=intent_id,
         side=side,
         qty=1,
+        qty_type="units",
         placement=types.SimpleNamespace(order_type="market", limit=None, trigger=None),
     )
 
@@ -1054,7 +1075,7 @@ def test_a_run_whose_destination_changes_under_it_stops_and_says_what_is_open(ca
     # the exit is accepted by the sandbox while the broker still holds the
     # position. The platform reports success for both, so nothing else in this
     # program can tell that the position is now unmanaged.
-    session = _routing_session(["live", "analyzer"])
+    session = _routing_session(["live", "analyzer"], holding=1.0)
 
     assert session._route(_an_order(1, "buy")) is True
     assert session.stopping is False
@@ -1066,6 +1087,51 @@ def test_a_run_whose_destination_changes_under_it_stops_and_says_what_is_open(ca
     assert "STOPPING" in said
     assert "analyzer" in said and "live" in said
     assert "checked and closed by a person" in said
+
+
+def test_a_flat_run_follows_the_platform_when_the_destination_changes(capsys):
+    """THE ONE THIS GAINED, AND THE COMPLAINT BEHIND IT.
+
+    An operator moves the platform between live and analyzer several times a
+    day. This guard fired on the change rather than on the position, so a
+    toggle flipped and flipped back silently killed every idle strategy on the
+    server: a trader came back to a panel of stopped rows, each of which had
+    been doing nothing wrong.
+
+    A run holding nothing has nothing open at the earlier destination. There is
+    no exit to strand, so it follows the platform and carries on. What it must
+    not do is carry on quietly: the line says where its orders go now.
+    """
+    session = _routing_session(["live", "analyzer"], holding=0.0)
+
+    assert session._route(_an_order(1, "buy")) is True
+    assert session._route(_an_order(2, "buy")) is True
+
+    assert session.stopping is False, "a flat run was stopped by a toggle it could follow"
+    assert session._destination == "analyzer"
+    said = capsys.readouterr().out
+    assert "STOPPING" not in said
+    assert "holding nothing" in said
+
+
+def test_a_position_this_run_cannot_measure_counts_as_one_it_holds(capsys):
+    """Catches an unreadable position read as flat.
+
+    Flat is the answer that lets a run carry on through a changed destination.
+    Guessing it wrong the safe way costs a stopped strategy and a line saying
+    so; guessing it wrong the other way sends an exit somewhere the entry never
+    went.
+    """
+
+    def raises():
+        raise RuntimeError("the ledger would not answer")
+
+    session = _routing_session(["live", "analyzer"])
+    session.ledger = types.SimpleNamespace(size=raises)
+
+    assert session._route(_an_order(1, "buy")) is True
+    assert session._route(_an_order(2, "sell")) is False
+    assert session.stopping is True
 
 
 def test_a_destination_that_does_not_change_never_stops_the_run(capsys):

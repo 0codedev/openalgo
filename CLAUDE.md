@@ -46,6 +46,7 @@ Detailed procedures live in `.claude/skills/` and load on demand:
 - **`version-bump`** — releasing the platform, or bumping the pinned `openalgo` SDK (two unrelated version numbers)
 - **`broker-integration`** — adding or modifying a broker plugin
 - **`chart-indicator`** — building a custom indicator for the `/trading` chart. These are plain JavaScript descriptors on `openalgo-charts`, unrelated to the Python `openalgo.ta` indicators used from strategies and scanners.
+- **`openscript`**: writing a study or strategy in OpenScript, the language compiled by `openalgo-script` and run from `strategies/openscript/`. A third unrelated thing called an indicator: not the JavaScript chart descriptors above, and not `openalgo.ta`.
 
 ## Security and Deployment Model
 
@@ -308,6 +309,34 @@ them: the index sat on 1.8.1 advertising "337 names" while `/trading` shipped
 2.1.5 with 363, and the eleven studies added in 1.8.3 were absent from the
 reference an indicator author reads.
 
+### Bumping openalgo-script also updates the openscript skill
+
+The same rule as the chart above, for the same reason: `reference/library.md`
+carries all 350 names with their warmups and marks the 95 that are **planned and
+not implemented**, so a bump that leaves it behind has an author reading a page
+about a compiler that is no longer installed. The marking is the part that
+matters most, because reaching for a planned name is refused at the call with
+`OS2020` and nothing warns first.
+
+```sh
+cd frontend && npm install openalgo-script@<version> --save-exact
+node .claude/skills/openscript/generate-reference.mjs    # rewrites the name table
+node .claude/skills/openscript/coverage.mjs              # must print COVERAGE COMPLETE
+node .claude/skills/openscript/check-pitfalls.mjs        # must print PITFALLS VERIFIED
+```
+
+The third is specific to this skill. `reference/pitfalls.md` teaches by naming
+diagnostic codes, and an author trusts a code; the script compiles both halves
+of every entry, so the wrong spelling must still produce the code named and the
+fix offered must still come out clean. It also holds the page and the script to
+the same set of codes, so neither drifts alone.
+
+The `openscript-skill` CI job runs all three. The generator owns the name table
+and nothing generates the teaching: after a bump, read the upstream changelog
+and update the prose in `SKILL.md`, `pitfalls.md` and `strategies.md` by hand,
+particularly wherever they say a name is planned. A version that implements one
+turns three pages stale at once.
+
 Two built-in pages exercise the streaming stack end to end: **`/websocket/test`**
 (market data; `/20`, `/30`, `/50` variants request those depth levels) and
 **`/websocket/order`** (account-level order/trade update stream). Use them to
@@ -318,6 +347,21 @@ verify a broker feed rather than writing a throwaway client.
 The reason to still register a route in `blueprints/react_app.py` is that
 unregistered paths hit `Error404Tracker` for *unauthenticated* visitors and
 count toward an IP ban.
+
+### Architecture changes also update the docs diagrams
+
+The architecture and flow diagrams on https://docs.openalgo.in are illustrated
+images in the separate `openalgo-docs` repository, each rendered from an HTML
+source (`diagrams/<slug>.html` -> `.gitbook/assets/diagram-<slug>.png`, tooling in
+`diagrams/_tools/`, rules in that repo's `CLAUDE.md`). **A change that adds a
+feature or changes a component, flow, process, port, database, thread model or
+integration is not done until the affected diagrams are updated in the same
+piece of work.** Find them with `grep -rl "diagram-" --include=*.md` in
+`openalgo-docs` and by reading the sources for the components you touched; edit
+the source, re-render, check the PNG, and fix any prose the change made wrong.
+Most readers are traders who trust the picture, so a stale diagram misleads more
+than a missing one. The Market Data diagram had silently lost the ZeroMQ bus this
+way before the September 2026 refresh.
 
 ### Adding a page: the three registrations
 

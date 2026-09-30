@@ -51,6 +51,12 @@ leaves it alone.
 No route, port or directive is added to the deployment's nginx configuration.
 Everything below is under ``location /``, which already proxies to the
 application, so a hosted install upgrades without a config migration.
+
+One route is not about sources. ``/instrument`` answers the facts the engine
+reads about the instrument a script runs on (tick size, lot size, volume, the
+zone and the trading session), which the page cannot know on its own and the
+platform already holds. ``services/openscript_instrument_service.py`` says where
+each one comes from.
 """
 
 import hashlib
@@ -62,11 +68,19 @@ from pathlib import Path
 
 from flask import Blueprint, jsonify, request, send_from_directory
 
+from services.openscript_instrument_service import get_instrument_facts
 from utils.logging import get_logger
 from utils.session import check_session_validity
 
 logger = get_logger(__name__)
 
+# A script name is matched with the default converter and never with ``path``.
+# ``path`` matches a slash, so ``/<path:filename>`` swallowed every route of
+# every blueprint registered beneath this one: ``/openscript/runner/status``
+# arrived here as the filename "runner/status", failed the name rule and was
+# answered 400, so the whole strategy runner was unreachable while looking
+# registered. A name this blueprint serves can never hold a slash: _SAFE_NAME
+# requires letters, digits, dot, dash or underscore and an .oscript ending.
 openscript_bp = Blueprint("openscript_bp", __name__, url_prefix="/openscript")
 
 SCRIPTS_DIR = Path("strategies") / "openscript"
@@ -76,6 +90,15 @@ SCRIPTS_DIR = Path("strategies") / "openscript"
 # the route to plain sources and rejects anything with a path separator, a dot
 # segment, or an extension this route does not own.
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\.oscript$")
+
+# What ``/instrument`` accepts. An exchange is a code (NSE, NSE_INDEX, CRYPTO).
+# A symbol is held to length and printable text only, because the master
+# contract has symbols with spaces, a dollar sign and lower case in them
+# ("NIFTY Alpha 50"), and a stricter pattern would refuse a chart the trader
+# can already open. The lookup is a parameterised query, so nothing here needs
+# to be safe for anything else.
+_EXCHANGE_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,19}$")
+_MAX_SYMBOL_LENGTH = 64
 
 # What a compiled program is called, appended to the source's own name.
 #
@@ -239,7 +262,60 @@ def index():
     return jsonify(scripts)
 
 
-@openscript_bp.route("/program/<path:filename>", methods=["GET"])
+@openscript_bp.route("/instrument", methods=["GET"])
+@check_session_validity
+def instrument():
+    """The instrument record the engine reads, for ``?symbol=&exchange=``.
+
+    Answers ``{"status": "success", "symbol", "contractFound", "instrument",
+    "today"}``: the facts in the engine's own field names, with every fact the
+    platform does not hold left out, and the calendar's window for today beside
+    them. A symbol the master contract does not have is not an error. It is
+    answered with what the exchange alone says (the zone, the session, whether
+    there is volume) and ``contractFound`` false, because a chart can be open on
+    an instrument whose contract has not been downloaded yet, and its session
+    facts are still worth stating.
+
+    Registered as a plain path, which Werkzeug matches ahead of ``/<filename>``
+    below, and ``_SAFE_NAME`` refuses the name in any case since it has no
+    ``.oscript`` ending.
+    """
+    symbol = (request.args.get("symbol") or "").strip()
+    exchange = (request.args.get("exchange") or "").strip().upper()
+
+    if not symbol or len(symbol) > _MAX_SYMBOL_LENGTH or not symbol.isprintable():
+        return jsonify(
+            {
+                "status": "error",
+                "message": "Pick a symbol from the search to read its details.",
+            }
+        ), 400
+    if not _EXCHANGE_CODE.fullmatch(exchange):
+        return jsonify(
+            {
+                "status": "error",
+                "message": "Pick the symbol again from the search, so its exchange comes with it.",
+            }
+        ), 400
+
+    try:
+        facts = get_instrument_facts(symbol, exchange)
+    except Exception:
+        logger.exception("Could not read instrument facts for %s on %s", symbol, exchange)
+        return jsonify(
+            {
+                "status": "error",
+                "message": (
+                    f"The details of {symbol} could not be read just now. They will be "
+                    "fetched again in a moment."
+                ),
+            }
+        ), 500
+
+    return jsonify({"status": "success", **facts})
+
+
+@openscript_bp.route("/program/<filename>", methods=["GET"])
 @check_session_validity
 def program(filename: str):
     """Serve the compiled program stored beside one source.
@@ -279,7 +355,7 @@ def program(filename: str):
     )
 
 
-@openscript_bp.route("/<path:filename>", methods=["GET"])
+@openscript_bp.route("/<filename>", methods=["GET"])
 @check_session_validity
 def source(filename: str):
     """Serve one script as plain text.
@@ -298,7 +374,7 @@ def source(filename: str):
     return send_from_directory(directory, filename, mimetype="text/plain; charset=utf-8")
 
 
-@openscript_bp.route("/<path:filename>", methods=["POST"])
+@openscript_bp.route("/<filename>", methods=["POST"])
 @check_session_validity
 def save(filename: str):
     """Create or replace one script, and the compiled program beside it.
@@ -507,7 +583,7 @@ def save(filename: str):
     )
 
 
-@openscript_bp.route("/<path:filename>", methods=["DELETE"])
+@openscript_bp.route("/<filename>", methods=["DELETE"])
 @check_session_validity
 def remove(filename: str):
     """Delete one script, the backup taken of it, and its compiled program.

@@ -196,11 +196,14 @@ class StandInRun:
 
 
 class StandInIntent:
-    def __init__(self, intent_id, kind="place", side="buy", qty=1.0, tag=""):
+    def __init__(self, intent_id, kind="place", side="buy", qty=1.0, tag="", qty_type="units"):
         self.intent_id = intent_id
         self.kind = kind
         self.side = side
         self.qty = qty
+        # The unit the quantity is counted in, which an engine intent always
+        # states (``host-interface.md`` 7.1).
+        self.qty_type = qty_type
         self.placement = types.SimpleNamespace(
             kind=kind, order_type="market", limit=None, trigger=None, tag=tag
         )
@@ -274,7 +277,19 @@ def stand_in_engine(raw, ledger=None, effects_from=None):
         capabilities=lambda *tags: ("core.1",) + tags,
         utc_time=None,
         session_facts=("session.isFirstBar",),
+        session_first="isSessionFirst",
         readable_zone="UTC",
+        calendar_reads=frozenset({"date.hour", "date.minute", "session.isIn"}),
+        # The one zone a stand-in reads a clock in. The real engine reads every
+        # zone this server's database holds once the host's reader is in place,
+        # and the tests of that run against the real one.
+        knows_zone=lambda zone: zone == "UTC",
+        reads_calendar_in=lambda zone: zone == "UTC",
+        time_reader=lambda zone: None,
+        join_calendar=lambda serving: True,
+        session_hours=lambda zone, window: window,
+        opening_day=lambda hours, time_ms, zone: None,
+        day_of=lambda text: None,
     )
     engine.run = run
     return engine
@@ -929,14 +944,25 @@ def slow_runner(tmp_path, monkeypatch, quiet_service):
 
 
 def _start(**overrides):
+    """Start one deployment: the script, the instrument and the bar together.
+
+    Named ``name`` rather than ``script`` because a run is a deployment: one
+    script is deployed on several instruments and several intervals at once, and
+    each is started, stopped and tracked on its own.
+    """
     given = {
-        "script": "turn.oscript",
+        "name": "turn.oscript",
         "symbol": "SYM1",
         "exchange": "EXCH1",
         "interval": "1m",
     }
     given.update(overrides)
     return service.start_run(**given)
+
+
+def deployed(script="turn.oscript", symbol="SYM1", exchange="EXCH1", interval="1m"):
+    """The id the deployment `_start` starts is known by."""
+    return service.run_id_for(script, symbol, exchange, interval)
 
 
 def test_starting_a_run_hands_the_worker_back_at_once(slow_runner):
@@ -969,7 +995,7 @@ def test_stopping_a_run_reaps_the_process(slow_runner):
     """
     ok, said = _start()
     assert ok, said
-    held = service.RUNNING_RUNS[service.run_id_for("turn.oscript")]
+    held = service.RUNNING_RUNS[deployed()]
     pid = held["pid"]
     process = held["process"]
 
@@ -1048,7 +1074,7 @@ def test_the_log_goes_where_this_platform_already_keeps_strategy_logs(slow_runne
     ok, said = _start()
     assert ok, said
     try:
-        run_id = service.run_id_for("turn.oscript")
+        run_id = deployed()
         written = service.logs_for(run_id)
         assert written, "the run wrote no log at all"
         assert re.match(rf"^{re.escape(run_id)}_\d{{8}}_\d{{6}}_IST\.log$", written[0].name)
@@ -1095,7 +1121,7 @@ def test_a_run_that_has_finished_is_dropped_from_the_registry(quiet_service, tmp
 
     ok, said = _start()
     assert ok, said
-    run_id = service.run_id_for("turn.oscript")
+    run_id = deployed()
 
     process = service.RUNNING_RUNS[run_id]["process"]
     deadline = time.monotonic() + 30
@@ -1121,18 +1147,30 @@ def test_every_run_is_stopped_before_the_worker_goes(slow_runner):
     """
     ok, said = _start()
     assert ok, said
-    held = service.RUNNING_RUNS[service.run_id_for("turn.oscript")]
+    held = service.RUNNING_RUNS[deployed()]
     process = held["process"]
 
     stopped = service.stop_every_run()
 
-    assert stopped == [service.run_id_for("turn.oscript")]
+    assert stopped == [deployed()]
     assert process.poll() is not None
     assert service.RUNNING_RUNS == {}
 
 
 def test_stopping_every_run_is_what_happens_when_the_interpreter_exits():
-    """Registered at import, so nobody has to remember to ask for it."""
+    """Registered at import, so nobody has to remember to ask for it.
+
+    What is registered is the exit wrapper rather than ``stop_every_run``
+    itself. The two differ in one step: the function re-raises an interrupt it
+    caught, because a caller that asked to exit should exit, and the wrapper
+    swallows it, because by the time an ``atexit`` callback runs the exit code is
+    already set and re-raising can only print that the exception was ignored.
+
+    So this asserts both halves. Registering something is not enough, and
+    registering something that does not stop every run is the failure this test
+    exists for: a child outlives its parent, and one left behind keeps placing
+    orders.
+    """
     tree = _syntax_of(SERVICE_PATH)
     registered = [
         node
@@ -1144,11 +1182,29 @@ def test_stopping_every_run_is_what_happens_when_the_interpreter_exits():
         and node.func.value.id == "atexit"
     ]
     assert registered, "nothing is registered to run when this worker exits"
-    assert any(
-        isinstance(one.args[0], ast.Name) and one.args[0].id == "stop_every_run"
-        for one in registered
-        if one.args
-    )
+
+    names = {one.args[0].id for one in registered if one.args and isinstance(one.args[0], ast.Name)}
+    assert names, "what is registered at exit is not a plain function name"
+
+    wanted = {"stop_every_run", "_stop_every_run_at_exit"}
+    chosen = names & wanted
+    assert chosen, f"what runs at exit is {sorted(names)}, none of which stops the runs"
+
+    # Whichever is registered has to actually reach `stop_every_run`.
+    for name in chosen:
+        if name == "stop_every_run":
+            continue
+        wrapper = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == name
+        )
+        calls = {
+            node.func.id
+            for node in ast.walk(wrapper)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert "stop_every_run" in calls, f"{name} does not stop the runs"
 
 
 def test_a_name_that_is_not_a_script_never_reaches_a_command_line(quiet_service):
@@ -1442,7 +1498,12 @@ def test_saving_one_script_s_settings_leaves_every_other_script_alone(settings):
     assert run_config.write_run_config("one.oscript", "SYM1", "EXCH1", "1m")[0]
     assert run_config.write_run_config("two.oscript", "SYM2", "EXCH2", "5m")[0]
 
-    assert set(run_config.all_run_configs()) == {"one.oscript", "two.oscript"}
+    # Each carries a token of its own, so the ids are read back rather than
+    # written down: a deployment made where another was removed must not be
+    # that one. What this test is about is that saving one left the other alone.
+    keys = run_config.all_run_configs()
+    assert len(keys) == 2
+    assert sorted(one["script"] for one in keys.values()) == ["one.oscript", "two.oscript"]
     assert run_config.read_run_config("one.oscript")["symbol"] == "SYM1"
     assert run_config.read_run_config("two.oscript")["symbol"] == "SYM2"
 
@@ -1553,7 +1614,7 @@ def test_a_run_that_ended_by_itself_is_gone_without_anybody_sweeping(
 
     ok, said = service.start_run("turn.oscript", "SYM1", "EXCH1", "1m")
     assert ok, said
-    run_id = service.run_id_for("turn.oscript")
+    run_id = deployed()
 
     # Read straight out of the dictionary, so waiting for the child does not
     # itself go through the sweep this test is about.
@@ -1713,29 +1774,36 @@ def test_the_signatures_two_other_callers_import_are_these():
     """
     contract = {
         service.start_run: (
-            "(script: str, symbol: str = '', exchange: str = '', interval: str = '', "
+            "(name: str, symbol: str = '', exchange: str = '', interval: str = '', "
             "user_id: str | None = None, product: str = '', history_days: int = 5, "
             "poll_seconds: float = 15.0) -> tuple[bool, str]"
         ),
-        service.stop_run: "(script_or_run_id: str) -> tuple[bool, str]",
+        service.stop_run: (
+            "(script_or_run_id: str, forget: bool = True, close: bool = False) "
+            "-> tuple[bool, str]"
+        ),
         service.is_running: "(script_or_run_id: str) -> bool",
         service.status_of: "(script_or_run_id: str) -> dict | None",
         service.running_runs: "() -> list[dict]",
         service.reap_finished_runs: "() -> list[str]",
         service.stop_every_run: "() -> list[str]",
-        service.run_id_for: "(script: str) -> str",
+        service.run_id_for: (
+            "(script: str, symbol: str = '', exchange: str = '', interval: str = '') -> str"
+        ),
         service.logs_for: "(run_id: str) -> list[pathlib.Path]",
         service.log_file_for: (
             "(run_id: str, started: datetime.datetime | None = None) -> pathlib.Path"
         ),
         service.runner_program_path: "() -> pathlib.Path | None",
-        run_config.read_run_config: "(script: str) -> dict | None",
-        run_config.require_run_config: "(script: str) -> tuple[dict | None, str]",
+        run_config.read_run_config: "(name: str) -> dict | None",
+        run_config.require_run_config: "(name: str) -> tuple[dict | None, str]",
+        run_config.deployments_of: "(script: str) -> dict[str, dict]",
         run_config.write_run_config: (
             "(script: str, symbol: str, exchange: str, interval: str, product: str = '', "
-            "user_id: str | None = None) -> tuple[bool, str]"
+            "user_id: str | None = None, inputs: Any = None, deployment: str = '') "
+            "-> tuple[bool, str]"
         ),
-        run_config.delete_run_config: "(script: str) -> tuple[bool, str]",
+        run_config.delete_run_config: "(name: str) -> tuple[bool, str]",
         run_config.all_run_configs: "() -> dict[str, dict]",
         run_config.is_script_name: "(name: str) -> bool",
         run_config.is_run_field: "(value: str) -> bool",
@@ -1773,7 +1841,10 @@ def test_one_start_reaches_the_real_service_and_the_real_settings(tmp_path, monk
     ok, message = start_run("turn.oscript")
     try:
         assert ok, message
-        held = service.RUNNING_RUNS[run_id_for("turn.oscript")]
+        # The deployment's own id, read back from the settings that were just
+        # saved: a run wears it so its orders land in its own book.
+        only = next(iter(run_config.all_run_configs()))
+        held = service.RUNNING_RUNS[only]
         assert held["symbol"] == "SYM1"
         assert psutil.pid_exists(held["pid"])
     finally:
