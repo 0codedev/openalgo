@@ -78,6 +78,9 @@ def get_api_response(endpoint, auth, method="GET", payload="", retry_count=0):
             else None
         )
         if delay is not None:
+            if delay > 2.0:
+                logger.warning(f"Upstox rate limit hit on {endpoint}; delay {delay:.2f}s exceeds non-blocking threshold, raising BrokerBusyError")
+                raise BrokerBusyError(retry_after=delay)
             logger.warning(
                 f"Upstox rate limit hit on {endpoint}; retrying in {delay:.2f}s "
                 f"(attempt {retry_count + 1}/{MAX_RETRIES})"

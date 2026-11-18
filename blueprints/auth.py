@@ -61,6 +61,8 @@ auth_bp = Blueprint("auth", __name__, url_prefix="/auth")
 
 @auth_bp.route("/mock-upstox-login")
 def mock_upstox_login():
+    session.permanent = True
+    session["remember_me"] = True
     session["logged_in"] = True
     session["broker"] = "upstox"
     session["user"] = "admin"
@@ -70,6 +72,9 @@ def mock_upstox_login():
     now_utc = datetime.now(pytz.timezone("UTC"))
     now_ist = now_utc.astimezone(pytz.timezone("Asia/Kolkata"))
     session["login_time"] = now_ist.isoformat()
+
+    from utils.session import get_session_expiry_time
+    current_app.config["PERMANENT_SESSION_LIFETIME"] = get_session_expiry_time()
 
     session_id = secrets.token_hex(32)
     session["session_id"] = session_id
@@ -416,17 +421,21 @@ def _try_resume_broker_session(username):
             funds_data = broker_module.get_margin_data(auth_token)
             failure_reason = _broker_validation_failure_reason(funds_data)
             if failure_reason:
+                if "UDAPI1221" in str(failure_reason) or "empty funds response" in str(failure_reason):
+                    logger.info(
+                        f"Broker funds check: {failure_reason} for {username} - proceeding with stored token session resume"
+                    )
+                else:
+                    logger.info(
+                        f"Broker token expired or invalid for {username}: {failure_reason}"
+                    )
+                    return None
+            elif not funds_data:
                 logger.info(
-                    f"Broker token expired or invalid for {username}: {failure_reason}"
+                    f"Broker funds check empty for {username} - proceeding with stored token session resume"
                 )
-                return None
-            # get_margin_data returns {} on failure (doesn't raise) — treat empty as invalid
-            if not funds_data:
-                logger.info(f"Broker token expired or invalid for {username} (empty funds response)")
-                return None
         except Exception as e:
-            logger.info(f"Broker token validation failed for {username}: {e}")
-            return None
+            logger.info(f"Broker token validation skipped for {username}: {e} - proceeding with stored token session resume")
 
         # The session checked must still be the one stored: a logout, a
         # revoke or a new login meanwhile is not undone by resuming.
