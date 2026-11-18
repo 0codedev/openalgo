@@ -160,7 +160,7 @@ export const PostTradeTrajectoryChart: React.FC<PostTradeTrajectoryChartProps> =
     const container = chartContainerRef.current
     const chart = createChart(container, {
       width: container.clientWidth || 600,
-      height: 220,
+      height: 300,
       layout: {
         background: { type: ColorType.Solid, color: 'transparent' },
         textColor: '#94a3b8',
@@ -278,7 +278,7 @@ export const PostTradeTrajectoryChart: React.FC<PostTradeTrajectoryChartProps> =
       </div>
 
       {/* Chart Canvas Area */}
-      <div className="relative w-full h-[220px]">
+      <div className="relative w-full h-[300px]">
         {loading && (
           <div className="absolute inset-0 bg-background/50 backdrop-blur-[1px] flex items-center justify-center z-10 rounded">
             <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground">

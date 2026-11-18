@@ -12,10 +12,10 @@ import {
   Settings2,
   X,
   XCircle,
-  ExternalLink,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { type QuotesData, tradingApi } from '@/api/trading'
+import { ChartSymbolLink } from '@/components/trading/ChartSymbolLink'
 import GttTab from '@/components/trading/GttTab'
 import {
   AlertDialog,
@@ -58,7 +58,6 @@ import { useSupportedExchanges } from '@/hooks/useSupportedExchanges'
 import { cn, makeFormatCurrency, sanitizeCSV } from '@/lib/utils'
 import { useAuthStore } from '@/stores/authStore'
 import { onModeChange } from '@/stores/themeStore'
-import { openChart } from '@/utils/chartUrl'
 import type { Order, OrderStats } from '@/types/trading'
 import { showToast } from '@/utils/toast'
 
@@ -721,16 +720,9 @@ export default function OrderBook() {
                         const canCancel = order.order_status === 'open'
 
                         return (
-                          <TableRow key={`${order.orderid}-${index}`} className="group">
+                          <TableRow key={`${order.orderid}-${index}`}>
                             <TableCell className="font-medium">
-                              <button
-                                onClick={() => openChart(order.symbol, order.exchange)}
-                                className="hover:text-indigo-500 font-medium transition-colors flex items-center gap-1.5 text-left"
-                                title="Open Chart"
-                              >
-                                {order.symbol}
-                                <ExternalLink size={12} className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground" />
-                              </button>
+                              <ChartSymbolLink symbol={order.symbol} exchange={order.exchange} />
                             </TableCell>
                             <TableCell>
                               <Badge variant="outline">{order.exchange}</Badge>

@@ -13,7 +13,6 @@ import {
   TrendingDown,
   TrendingUp,
   X,
-  ExternalLink,
   Eye,
   EyeOff,
   Activity,
@@ -24,6 +23,7 @@ import { tradingApi } from '@/api/trading'
 import { ManageProtectionDialog } from '@/components/trading/ManageProtectionDialog'
 import { StrategyBadge } from '@/components/trading/StrategyBadge'
 import { PostTradeIntelligenceDrawer } from '@/components/trading/PostTradeIntelligenceDrawer'
+import { ChartSymbolLink } from '@/components/trading/ChartSymbolLink'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
   AlertDialog,
@@ -48,6 +48,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
+import { EmptyState } from '@/components/ui/empty-state'
 import { Label } from '@/components/ui/label'
 import {
   Table,
@@ -65,10 +66,8 @@ import { useSupportedExchanges } from '@/hooks/useSupportedExchanges'
 import { cn, makeFormatCurrency, sanitizeCSV } from '@/lib/utils'
 import { useAuthStore } from '@/stores/authStore'
 import { onModeChange } from '@/stores/themeStore'
-import { openChart } from '@/utils/chartUrl'
 import type { Position } from '@/types/trading'
 import { showToast } from '@/utils/toast'
-import { EmptyState } from '@/components/ui/empty-state'
 
 const STORAGE_KEY = 'openalgo_positions_prefs'
 
@@ -1024,10 +1023,12 @@ export default function Positions() {
               icon={ChartCandlestick}
               title="No positions match your filters"
               description="Try adjusting or clearing your filters to see results."
-              action={hasActiveFilters ?
-                <Button variant="ghost" size="sm" onClick={clearFilters}>
-                  Clear Filters
-                </Button> : undefined
+              action={
+                hasActiveFilters ? (
+                  <Button variant="ghost" size="sm" onClick={clearFilters}>
+                    Clear Filters
+                  </Button>
+                ) : undefined
               }
             />
           ) : (
@@ -1040,8 +1041,8 @@ export default function Positions() {
                     {!isCrypto && <TableHead className="w-[80px]">Product</TableHead>}
                     <TableHead className="w-[90px]">Type</TableHead>
                     <TableHead className="w-[160px]">Strategy</TableHead>
-                    <SortableHeader column={3} label="Qty" className="w-[85px] text-right" />
-                    <SortableHeader column={4} label="Avg Price" className="w-[120px] text-right" />
+                    <SortableHeader column={3} label="Qty" className="w-[105px] text-right" />
+                    <SortableHeader column={4} label="Avg Price" className="w-[150px] text-center" />
                     <TableHead className="w-[100px] text-right">LTP</TableHead>
                     <TableHead className="w-[105px] text-center">Stop Loss</TableHead>
                     <TableHead className="w-[105px] text-center">Target</TableHead>
@@ -1110,14 +1111,10 @@ export default function Positions() {
                               <React.Fragment key={rowKey}>
                                 <TableRow className="group">
                                   <TableCell className="w-[140px] font-medium">
-                                    <button
-                                      onClick={() => openChart(position.symbol, position.exchange)}
-                                      className="hover:text-indigo-500 font-medium transition-colors flex items-center gap-1.5 text-left"
-                                      title="Open Chart"
-                                    >
-                                      {position.symbol}
-                                      <ExternalLink size={12} className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground" />
-                                    </button>
+                                    <ChartSymbolLink
+                                      symbol={position.symbol}
+                                      exchange={position.exchange}
+                                    />
                                   </TableCell>
                                   <TableCell className="w-[80px]">
                                     <Badge
@@ -1154,7 +1151,7 @@ export default function Positions() {
                                   </TableCell>
                                   <TableCell
                                     className={cn(
-                                      'w-[85px] text-right font-medium',
+                                      'w-[105px] text-right font-medium',
                                       position.quantity === 0
                                         ? 'text-muted-foreground'
                                         : position.quantity > 0
@@ -1165,12 +1162,15 @@ export default function Positions() {
                                     {isEnhancedView && position.quantity === 0 && position.closed_qty ? (
                                       <div className="flex flex-col items-end gap-0.5 leading-none">
                                         <span className="font-mono text-xs font-semibold text-muted-foreground">0</span>
-                                        <span className="text-xs font-mono font-medium text-foreground/80">
+                                        <span className="text-[11px] font-mono font-medium text-foreground/80 whitespace-nowrap">
                                           {position.closed_qty} Traded
                                         </span>
                                         {position.traded_value ? (
-                                          <span className="text-[10px] font-mono text-muted-foreground/70" title={`Total Turnover: ₹${position.traded_value.toLocaleString('en-IN')}`}>
-                                            ₹{position.traded_value >= 100000 ? `${(position.traded_value / 100000).toFixed(2)}L` : `${(position.traded_value / 1000).toFixed(1)}k`} TO
+                                          <span
+                                            className="text-[10px] font-mono font-medium text-indigo-400 bg-indigo-500/10 px-1.5 py-0.5 rounded border border-indigo-500/20 whitespace-nowrap mt-0.5"
+                                            title={`Total Traded Turnover: ₹${position.traded_value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                                          >
+                                            TO ₹{position.traded_value >= 100000 ? `${(position.traded_value / 100000).toFixed(2)}L` : `${(position.traded_value / 1000).toFixed(1)}k`}
                                           </span>
                                         ) : null}
                                       </div>
@@ -1178,25 +1178,30 @@ export default function Positions() {
                                       <div className="flex flex-col items-end gap-0.5 leading-none">
                                         <span className="font-mono font-medium">{position.quantity}</span>
                                         {isEnhancedView && position.invested_value ? (
-                                          <span className="text-[10px] font-mono text-muted-foreground/70" title={`Invested Capital: ₹${position.invested_value.toLocaleString('en-IN')}`}>
-                                            ₹{position.invested_value >= 100000 ? `${(position.invested_value / 100000).toFixed(2)}L` : `${(position.invested_value / 1000).toFixed(1)}k`}
+                                          <span
+                                            className="text-[10px] font-mono font-medium text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20 whitespace-nowrap mt-0.5"
+                                            title={`Invested Capital: ₹${position.invested_value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                                          >
+                                            INV ₹{position.invested_value >= 100000 ? `${(position.invested_value / 100000).toFixed(2)}L` : `${(position.invested_value / 1000).toFixed(1)}k`}
                                           </span>
                                         ) : null}
                                       </div>
                                     )}
                                   </TableCell>
-                                  <TableCell className="w-[120px] text-right font-mono">
+                                  <TableCell className="w-[150px] text-center font-mono">
                                     {isEnhancedView && position.quantity === 0 && position.entry_price ? (
-                                      <div className="flex flex-col items-end gap-0.5 leading-none">
-                                        <div className="flex items-center gap-1.5 text-xs font-mono">
+                                      <div className="flex flex-col items-center justify-center gap-0.5 leading-none">
+                                        <div className="flex items-center justify-center gap-1.5 text-xs font-mono">
                                           <span className="text-muted-foreground">₹{position.entry_price.toFixed(2)}</span>
-                                          <span className="text-muted-foreground/40">→</span>
+                                          <span className="text-muted-foreground/40 font-sans">→</span>
                                           <span className="text-foreground font-semibold">₹{(position.exit_price || 0).toFixed(2)}</span>
                                         </div>
-                                        <span className="text-xs text-muted-foreground/70 font-sans">Entry → Exit</span>
+                                        <span className="text-[10px] text-muted-foreground/70 font-sans tracking-wide">Entry → Exit</span>
                                       </div>
                                     ) : (
-                                      formatCurrency(position.average_price)
+                                      <div className="flex flex-col items-center justify-center">
+                                        <span className="text-sm font-medium">{formatCurrency(position.average_price)}</span>
+                                      </div>
                                     )}
                                   </TableCell>
                                   <TableCell className="w-[100px] text-right font-mono">

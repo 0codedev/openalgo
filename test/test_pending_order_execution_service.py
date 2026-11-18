@@ -263,7 +263,9 @@ def test_only_pilot_brokers_ship_gtt_modules():
     # Angel, Fyers and Upstox joined the Dhan and Zerodha pilot in 6d7f2552.
     # The set is exhaustive on purpose: a broker gaining a gtt_api module by
     # accident should fail here rather than silently start routing GTTs.
-    assert brokers == {"angel", "dhan", "fyers", "upstox", "zerodha"}
+    # Rupeezy joined with its Vortex GTT API (single + OCO).
+    # Pocketful joined with its event GTT API (single only; OCO is refused).
+    assert brokers == {"angel", "dhan", "fyers", "pocketful", "rupeezy", "upstox", "zerodha"}
 
 
 def test_queue_order_remains_successful_when_notification_fails(monkeypatch):
