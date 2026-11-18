@@ -27,6 +27,7 @@ export default function Login() {
   const [totpCode, setTotpCode] = useState('')
   const [step, setStep] = useState<'password' | 'totp'>('password')
   const [showPassword, setShowPassword] = useState(false)
+  const [rememberMe, setRememberMe] = useState(true)
   const [isLoading, setIsLoading] = useState(false)
   const [isCheckingSetup, setIsCheckingSetup] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -101,6 +102,7 @@ export default function Login() {
       formData.append('username', username)
       formData.append('password', password)
       formData.append('csrf_token', csrfData.csrf_token)
+      formData.append('remember_me', rememberMe ? 'true' : 'false')
 
       // Use native fetch like the original template
       const response = await fetch('/auth/login', {
@@ -137,7 +139,7 @@ export default function Login() {
         setError(null)
       } else {
         // Set login state (broker from response if session was resumed, empty otherwise)
-        setLogin(username, data.broker || '')
+        setLogin(username, data.broker || '', rememberMe)
         showToast.success('Login successful', 'system')
         // Use redirect from response if provided, otherwise go to broker
         navigate(data.redirect || '/broker')
@@ -273,7 +275,16 @@ export default function Login() {
                         )}
                       </Button>
                     </div>
-                    <div className="text-right">
+                    <div className="flex items-center justify-between pt-1">
+                      <label className="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={rememberMe}
+                          onChange={(e) => setRememberMe(e.target.checked)}
+                          className="rounded border-border text-primary focus:ring-primary h-4 w-4"
+                        />
+                        <span>Remember this device</span>
+                      </label>
                       <Link
                         to="/reset-password"
                         className="text-sm text-muted-foreground hover:text-primary"

@@ -224,9 +224,10 @@ class SlidingWindowLimiter:
                 refused = False
                 self._reserved.append(slot)
         if refused:
+            ceiling_str = f"{ceiling:.0f}s" if ceiling is not None else "unbounded"
             logger.warning(
                 f"Rate limiting ({self.name}): refused a request whose turn was "
-                f"{wait:.1f}s away (limit {ceiling:.0f}s under gthread)"
+                f"{wait:.1f}s away (limit {ceiling_str} under gthread)"
             )
             raise busy_error(wait, self.kind)
         return wait

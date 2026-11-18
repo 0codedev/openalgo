@@ -38,6 +38,13 @@ logger = get_logger(__name__)
 # Maximum age (seconds) for WebSocket data to be considered fresh
 WEBSOCKET_DATA_MAX_AGE = 5
 
+import threading
+
+# Thread-safe in-memory cache for live MTM quotes (3s TTL)
+_MTM_QUOTE_CACHE = {}
+_MTM_CACHE_TTL = 3.0
+_MTM_CACHE_LOCK = threading.Lock()
+
 
 def parse_expiry_from_symbol(symbol, exchange):
     """
@@ -645,8 +652,16 @@ class PositionManager:
             # Preload user's trades for today to compute trade execution history and counterfactuals
             trades_by_key = {}
             try:
+                trade_cutoff = (
+                    last_session_expiry.replace(tzinfo=None)
+                    if hasattr(last_session_expiry, "tzinfo") and last_session_expiry.tzinfo
+                    else last_session_expiry
+                )
                 user_trades = (
-                    SandboxTrades.query.filter(SandboxTrades.user_id == self.user_id)
+                    SandboxTrades.query.filter(
+                        SandboxTrades.user_id == self.user_id,
+                        SandboxTrades.trade_timestamp >= trade_cutoff,
+                    )
                     .order_by(SandboxTrades.trade_timestamp.asc())
                     .all()
                 )
@@ -657,6 +672,20 @@ class PositionManager:
                     trades_by_key[key].append(t)
             except Exception as e:
                 logger.warning(f"Could not load trades for post-trade analysis: {e}")
+
+            # Preload user's orders for today to resolve order types
+            orders_by_id = {}
+            try:
+                user_orders = (
+                    SandboxOrders.query.filter(
+                        SandboxOrders.user_id == self.user_id,
+                        SandboxOrders.order_timestamp >= trade_cutoff,
+                    ).all()
+                )
+                for ord_obj in user_orders:
+                    orders_by_id[ord_obj.orderid] = ord_obj
+            except Exception as e:
+                logger.warning(f"Could not load orders for post-trade analysis: {e}")
 
             for position in positions:
                 unrealized_pnl = Decimal(str(position.pnl))  # Current unrealized P&L from MTM
@@ -679,6 +708,28 @@ class PositionManager:
                 # For closed positions (qty=0): standard resets to 0% (like Zerodha), enhanced telemetry computed below
                 pos_cv = _cv_map.get(position.symbol, 1.0)
                 pos_cv_dec = Decimal(str(pos_cv))
+
+                pos_trades = trades_by_key.get((position.symbol, position.exchange, position.product), [])
+                buy_trades = [t for t in pos_trades if t.action == "BUY"]
+                sell_trades = [t for t in pos_trades if t.action == "SELL"]
+                tot_buy_qty = sum(t.quantity for t in buy_trades)
+                tot_sell_qty = sum(t.quantity for t in sell_trades)
+                buy_val = sum(t.quantity * float(t.price) for t in buy_trades)
+                sell_val = sum(t.quantity * float(t.price) for t in sell_trades)
+
+                strategy_lots = {}
+                if pos_trades:
+                    for t in pos_trades:
+                        s_name = (getattr(t, "strategy", None) or "MANUAL").strip()
+                        strategy_lots[s_name] = strategy_lots.get(s_name, 0) + t.quantity
+
+                if strategy_lots and len(strategy_lots) > 1:
+                    pos_strategy = ", ".join([f"{s} ({q} qty)" for s, q in strategy_lots.items()])
+                elif strategy_lots:
+                    pos_strategy = list(strategy_lots.keys())[0]
+                else:
+                    pos_strategy = getattr(position, "strategy", "") or ""
+
                 if position.quantity != 0:
                     investment = abs(
                         Decimal(str(position.average_price))
@@ -699,6 +750,13 @@ class PositionManager:
                     counterfactual_pnl = 0.0
                     left_on_table = 0.0
                     counterfactual_status = "open"
+                    pos_strategy = getattr(position, "strategy", "") or ""
+
+                    pos_trades = trades_by_key.get((position.symbol, position.exchange, position.product), [])
+                    entry_trades = [t for t in pos_trades if (t.action == "BUY" if position.quantity > 0 else t.action == "SELL")]
+                    entry_types = [orders_by_id[t.orderid].price_type for t in entry_trades if t.orderid in orders_by_id and orders_by_id[t.orderid].price_type]
+                    entry_order_type = entry_types[0] if entry_types else "MARKET"
+                    exit_order_type = "-"
                 else:
                     # Closed position - standard view shows 0% and avg=0 (like Zerodha)
                     calculated_pnl_percent = Decimal("0.00")
@@ -713,6 +771,14 @@ class PositionManager:
                     counterfactual_pnl = 0.0
                     left_on_table = 0.0
                     counterfactual_status = "neutral"
+                    pos_strategy = getattr(position, "strategy", "") or ""
+                    if not pos_strategy and pos_trades:
+                        strats = [t.strategy for t in pos_trades if getattr(t, "strategy", None)]
+                        if strats:
+                            pos_strategy = strats[-1]
+
+                    entry_order_type = "-"
+                    exit_order_type = "-"
 
                     if pos_trades:
                         buy_trades = [t for t in pos_trades if t.action == "BUY"]
@@ -725,9 +791,32 @@ class PositionManager:
                         avg_sell = (sell_val / tot_sell_qty) if tot_sell_qty > 0 else 0.0
 
                         closed_qty = min(tot_buy_qty, tot_sell_qty) if (tot_buy_qty > 0 and tot_sell_qty > 0) else max(tot_buy_qty, tot_sell_qty)
-                        is_long_initial = (pos_trades[0].action == "BUY") if pos_trades else True
 
-                        if is_long_initial:
+                        running_qty = 0
+                        max_long = 0
+                        max_short = 0
+                        for t in pos_trades:
+                            delta = t.quantity if t.action == "BUY" else -t.quantity
+                            running_qty += delta
+                            if running_qty > max_long:
+                                max_long = running_qty
+                            if running_qty < -max_short:
+                                max_short = -running_qty
+
+                        if max_long > 0 or max_short > 0:
+                            is_long_cycle = (max_long >= max_short)
+                        else:
+                            is_long_cycle = (pos_trades[0].action == "BUY") if pos_trades else True
+
+                        entry_trades = buy_trades if is_long_cycle else sell_trades
+                        exit_trades = sell_trades if is_long_cycle else buy_trades
+
+                        entry_types = [orders_by_id[t.orderid].price_type for t in entry_trades if t.orderid in orders_by_id and orders_by_id[t.orderid].price_type]
+                        exit_types = [orders_by_id[t.orderid].price_type for t in exit_trades if t.orderid in orders_by_id and orders_by_id[t.orderid].price_type]
+                        entry_order_type = entry_types[0] if entry_types else ("MARKET" if entry_trades else "-")
+                        exit_order_type = exit_types[-1] if exit_types else ("MARKET" if exit_trades else "-")
+
+                        if is_long_cycle:
                             entry_price = avg_buy if avg_buy > 0 else float(position.average_price or 0.0)
                             exit_price = avg_sell
                             if entry_price > 0:
@@ -785,6 +874,17 @@ class PositionManager:
                                         "status": ord.order_status,
                                     }
 
+                if position.quantity != 0:
+                    if stop_loss_data:
+                        order_type = f"{entry_order_type} → {stop_loss_data['price_type']}"
+                    else:
+                        order_type = entry_order_type
+                else:
+                    if exit_order_type != "-" and exit_order_type != entry_order_type:
+                        order_type = f"{entry_order_type} → {exit_order_type}"
+                    else:
+                        order_type = entry_order_type
+
                 positions_list.append(
                     {
                         "symbol": position.symbol,
@@ -803,7 +903,7 @@ class PositionManager:
                         "today_realized_pnl": float(today_realized),
                         "total_pnl_today": float(position_total_pnl_today),
                         "lot_size": pos_cv,  # contract_value multiplier (e.g. 0.01 for ETHUSD.P)
-                        "strategy": getattr(position, "strategy", "") or "",
+                        "strategy": pos_strategy or getattr(position, "strategy", "") or "",
                         "stop_loss": stop_loss_data,
                         "target": target_data,
                         # Enhanced Post-Trade Telemetry
@@ -814,6 +914,13 @@ class PositionManager:
                         "counterfactual_pnl": round(float(counterfactual_pnl), 2),
                         "left_on_table": round(float(left_on_table), 2),
                         "counterfactual_status": counterfactual_status,
+                        "order_type": order_type,
+                        "entry_order_type": entry_order_type,
+                        "exit_order_type": exit_order_type,
+                        "invested_value": round(float(abs(float(position.quantity)) * float(position.average_price) if position.quantity != 0 else (buy_val if buy_val > 0 else entry_price * closed_qty)), 2),
+                        "gross_exit_value": round(float(0.0 if position.quantity != 0 else (sell_val if sell_val > 0 else exit_price * closed_qty)), 2),
+                        "traded_value": round(float((buy_val + sell_val) if pos_trades else (abs(float(position.quantity)) * float(position.average_price) if position.quantity != 0 else (entry_price + exit_price) * closed_qty)), 2),
+                        "current_value": round(float(abs(float(position.quantity)) * float(position.ltp or position.average_price) if position.quantity != 0 else float((position.ltp or exit_price) * closed_qty)), 2),
                     }
                 )
 
@@ -887,10 +994,11 @@ class PositionManager:
             if not positions:
                 return
 
-            # Get unique symbols (include today's closed positions for live counterfactual MTM)
+            # Get unique symbols (prioritize open positions to conserve API budget)
             symbols_to_fetch = set()
             for position in positions:
-                symbols_to_fetch.add((position.symbol, position.exchange))
+                if position.quantity != 0:
+                    symbols_to_fetch.add((position.symbol, position.exchange))
 
             if not symbols_to_fetch:
                 return
@@ -938,22 +1046,28 @@ class PositionManager:
                 if position.quantity == 0:
                     continue
 
+                ltp_to_use = None
                 if quote:
-                    ltp = Decimal(str(quote.get("ltp", 0)))
-                    if ltp > 0:
-                        # Calculate current unrealized P&L for open position
-                        cv = self._get_contract_value(position.symbol, position.exchange)
-                        current_unrealized_pnl = self._calculate_position_pnl(
-                            position.quantity, position.average_price, ltp, contract_value=cv
-                        )
+                    ltp_val = Decimal(str(quote.get("ltp", 0)))
+                    if ltp_val > 0:
+                        position.ltp = ltp_val
+                        ltp_to_use = ltp_val
+                if not ltp_to_use and position.ltp and position.ltp > 0:
+                    ltp_to_use = position.ltp
 
-                        # pnl = unrealized only (broker standard - Zerodha Kite style)
-                        # This is the primary P&L field for open positions
-                        position.pnl = current_unrealized_pnl
+                if ltp_to_use and ltp_to_use > 0:
+                    # Calculate current unrealized P&L for open position
+                    cv = self._get_contract_value(position.symbol, position.exchange)
+                    current_unrealized_pnl = self._calculate_position_pnl(
+                        position.quantity, position.average_price, ltp_to_use, contract_value=cv
+                    )
 
-                        position.pnl_percent = self._calculate_pnl_percent(
-                            position.average_price, ltp, position.quantity
-                        )
+                    # pnl = unrealized only (broker standard - Zerodha Kite style)
+                    position.pnl = current_unrealized_pnl
+
+                    position.pnl_percent = self._calculate_pnl_percent(
+                        position.average_price, ltp_to_use, position.quantity
+                    )
 
             db_session.commit()
 
@@ -1121,33 +1235,42 @@ class PositionManager:
     def _fetch_quotes_batch(self, symbols_list):
         """
         Fetch quotes for multiple symbols in a single API call using multiquotes.
-        Returns dict mapping (symbol, exchange) to quote data.
-        Returns empty dict if multiquotes fails completely.
+        Uses in-memory cache (3s TTL) and non-blocking fallback to avoid freezing request threads.
         """
         quote_cache = {}
 
         if not symbols_list:
             return quote_cache
 
+        now = time.time()
+        missing_from_cache = []
+        with _MTM_CACHE_LOCK:
+            for item in symbols_list:
+                if item in _MTM_QUOTE_CACHE:
+                    ts, qdata = _MTM_QUOTE_CACHE[item]
+                    if now - ts < _MTM_CACHE_TTL:
+                        quote_cache[item] = qdata
+                    else:
+                        missing_from_cache.append(item)
+                else:
+                    missing_from_cache.append(item)
+
+        if not missing_from_cache:
+            return quote_cache
+
         try:
-            # Get any user's API key for fetching quotes
             from database.auth_db import ApiKeys, decrypt_token
 
             api_key_obj = ApiKeys.query.first()
-
             if not api_key_obj:
                 logger.debug("No API keys found for fetching multiquotes")
                 return quote_cache
 
-            # Decrypt the API key
             api_key = decrypt_token(api_key_obj.api_key_encrypted)
-
-            # Prepare symbols list for multiquotes API
             symbols_payload = [
-                {"symbol": symbol, "exchange": exchange} for symbol, exchange in symbols_list
+                {"symbol": symbol, "exchange": exchange} for symbol, exchange in missing_from_cache
             ]
 
-            # Use multiquotes service
             success, response, status_code = get_multiquotes(
                 symbols=symbols_payload, api_key=api_key
             )
@@ -1156,27 +1279,27 @@ class PositionManager:
                 results = response["results"]
                 successful_count = 0
 
-                for result in results:
-                    symbol = result.get("symbol")
-                    exchange = result.get("exchange")
+                with _MTM_CACHE_LOCK:
+                    for result in results:
+                        symbol = result.get("symbol")
+                        exchange = result.get("exchange")
 
-                    # Check if this result has data or error
-                    if "data" in result and result["data"]:
-                        quote_data = result["data"]
-                        quote_cache[(symbol, exchange)] = quote_data
-                        logger.debug(f"Multiquotes: {symbol} LTP={quote_data.get('ltp', 0)}")
-                        successful_count += 1
-                    elif "error" in result:
-                        logger.debug(f"Multiquotes error for {symbol}: {result['error']}")
+                        if "data" in result and result["data"]:
+                            quote_data = result["data"]
+                            quote_cache[(symbol, exchange)] = quote_data
+                            _MTM_QUOTE_CACHE[(symbol, exchange)] = (now, quote_data)
+                            successful_count += 1
+                        elif "error" in result:
+                            logger.debug(f"Multiquotes error for {symbol}: {result['error']}")
 
                 logger.info(
-                    f"Positions MTM: Multiquotes fetched {successful_count}/{len(symbols_list)} symbols"
+                    f"Positions MTM: Multiquotes fetched {successful_count}/{len(missing_from_cache)} symbols"
                 )
             else:
                 logger.debug(f"Multiquotes failed: {response.get('message', 'Unknown error')}")
 
         except Exception as e:
-            logger.debug(f"Exception in multiquotes fetch: {str(e)}")
+            logger.warning(f"Non-blocking fallback in multiquotes fetch: {e}")
 
         return quote_cache
 
@@ -1211,6 +1334,19 @@ class PositionManager:
                         "mode": "analyze",
                     },
                     404,
+                )
+
+            # Zero-Quantity Guard: prevent double-click short-flipping
+            if position.quantity == 0:
+                logger.info(f"Position {symbol} already flat (0 quantity). Duplicate close suppressed.")
+                return (
+                    True,
+                    {
+                        "status": "success",
+                        "message": f"Position for {symbol} is already closed (0 quantity).",
+                        "mode": "analyze",
+                    },
+                    200,
                 )
 
             # Determine action (opposite of current position)

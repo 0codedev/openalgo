@@ -32,6 +32,13 @@ export interface Position {
   counterfactual_pnl?: number
   left_on_table?: number
   counterfactual_status?: 'left_on_table' | 'saved_loss' | 'neutral' | 'open'
+  order_type?: string
+  entry_order_type?: string
+  exit_order_type?: string
+  invested_value?: number
+  gross_exit_value?: number
+  traded_value?: number
+  current_value?: number
 }
 
 export interface Order {

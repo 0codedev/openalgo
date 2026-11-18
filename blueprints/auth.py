@@ -401,7 +401,13 @@ def login():
 
             logger.info("[LOGIN] Existing session expired; clearing before password login")
             revoke_user_tokens()
+            remember_val = request.form.get("remember_me") or (request.json.get("remember_me") if request.is_json else None)
+            is_remember = str(remember_val).lower() in ("true", "1", "on", "yes")
+
             session.clear()
+            if is_remember:
+                session["remember_me"] = True
+                session.permanent = True
 
         if "user" in session:
             logger.info("[LOGIN] User in session but not logged_in, redirecting to /broker")

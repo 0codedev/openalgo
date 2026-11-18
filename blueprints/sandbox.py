@@ -548,6 +548,27 @@ def squareoff_status():
         ), 500
 
 
+def get_hidden_sandbox_trade_ids() -> set:
+    try:
+        from database.sandbox_db import engine
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS sandbox_hidden_trades (
+                    tradeid TEXT PRIMARY KEY,
+                    orderid TEXT,
+                    symbol TEXT,
+                    date TEXT,
+                    pnl REAL,
+                    hidden_at DATETIME
+                )
+            """))
+            res = conn.execute(text("SELECT tradeid FROM sandbox_hidden_trades")).fetchall()
+            return {str(r[0]).strip() for r in res if r[0]}
+    except Exception as e:
+        logger.debug(f"Error fetching hidden trade ids: {e}")
+        return set()
+
 @sandbox_bp.route("/mypnl/api/data")
 @check_session_validity
 @limiter.limit(API_RATE_LIMIT)
@@ -631,16 +652,19 @@ def api_my_pnl_data():
                     }
                 )
 
-        # Get recent trades
+        # Get recent trades (filtering out soft-deleted / hidden trades)
+        hidden_ids = get_hidden_sandbox_trade_ids()
         trades = (
             SandboxTrades.query.filter_by(user_id=user_id)
             .order_by(SandboxTrades.trade_timestamp.desc())
-            .limit(50)
+            .limit(100)
             .all()
         )
 
         trade_list = []
         for trade in trades:
+            if str(trade.tradeid).strip() in hidden_ids:
+                continue
             trade_list.append(
                 {
                     "tradeid": trade.tradeid,
@@ -655,6 +679,8 @@ def api_my_pnl_data():
                     else "",
                 }
             )
+            if len(trade_list) >= 50:
+                break
 
         # Get date-wise P&L history (last 30 days)
         from database.sandbox_db import SandboxDailyPnL
@@ -810,16 +836,19 @@ def my_pnl():
                     }
                 )
 
-        # Get recent trades
+        # Get recent trades (filtering out soft-deleted / hidden trades)
+        hidden_ids = get_hidden_sandbox_trade_ids()
         trades = (
             SandboxTrades.query.filter_by(user_id=user_id)
             .order_by(SandboxTrades.trade_timestamp.desc())
-            .limit(50)
+            .limit(100)
             .all()
         )
 
         trade_list = []
         for trade in trades:
+            if str(trade.tradeid).strip() in hidden_ids:
+                continue
             trade_list.append(
                 {
                     "tradeid": trade.tradeid,
@@ -834,6 +863,8 @@ def my_pnl():
                     else "",
                 }
             )
+            if len(trade_list) >= 50:
+                break
 
         # Get date-wise P&L history (last 30 days)
         from database.sandbox_db import SandboxDailyPnL
@@ -1273,12 +1304,14 @@ def export_trades():
     try:
         user_id = session.get("user")
 
-        # Get ALL trades for the user (no limit for export)
-        trades = (
+        # Get ALL trades for the user (filtering out soft-deleted / hidden trades)
+        hidden_ids = get_hidden_sandbox_trade_ids()
+        all_raw_trades = (
             SandboxTrades.query.filter_by(user_id=user_id)
             .order_by(SandboxTrades.trade_timestamp.desc())
             .all()
         )
+        trades = [t for t in all_raw_trades if str(t.tradeid).strip() not in hidden_ids]
 
         if not trades:
             return jsonify({"status": "error", "message": "No trades data to export"}), 404

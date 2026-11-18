@@ -22,6 +22,8 @@ import {
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { tradingApi } from '@/api/trading'
 import { ManageProtectionDialog } from '@/components/trading/ManageProtectionDialog'
+import { StrategyBadge } from '@/components/trading/StrategyBadge'
+import { PostTradeIntelligenceDrawer } from '@/components/trading/PostTradeIntelligenceDrawer'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
   AlertDialog,
@@ -189,6 +191,36 @@ export default function Positions() {
   })
   const [expandedPositionKeys, setExpandedPositionKeys] = useState<Set<string>>(new Set())
 
+  const DISMISSED_STORAGE_KEY = 'openalgo_dismissed_positions'
+  const [dismissedPositions, setDismissedPositions] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem(DISMISSED_STORAGE_KEY)
+      return saved ? new Set(JSON.parse(saved)) : new Set()
+    } catch {
+      return new Set()
+    }
+  })
+
+  const handleDismissPosition = (posKey: string) => {
+    setDismissedPositions((prev) => {
+      const next = new Set(prev)
+      next.add(posKey)
+      try {
+        localStorage.setItem(DISMISSED_STORAGE_KEY, JSON.stringify(Array.from(next)))
+      } catch {}
+      return next
+    })
+    showToast.success('Position dismissed from view', 'system')
+  }
+
+  const handleRestoreDismissed = () => {
+    setDismissedPositions(new Set())
+    try {
+      localStorage.removeItem(DISMISSED_STORAGE_KEY)
+    } catch {}
+    showToast.success('All dismissed positions restored', 'system')
+  }
+
   const toggleExpandPosition = (key: string) => {
     setExpandedPositionKeys((prev) => {
       const next = new Set(prev)
@@ -353,6 +385,9 @@ export default function Positions() {
   // Filter positions (use enhancedPositions for real-time LTP/PnL)
   const filteredPositions = useMemo(() => {
     return enhancedPositions.filter((pos) => {
+      const posKey = `${pos.symbol}-${pos.exchange}-${pos.product}`
+      if (dismissedPositions.has(posKey)) return false
+
       const qty = pos.quantity || 0
       if (hideClosed && qty === 0) return false
 
@@ -371,7 +406,7 @@ export default function Positions() {
 
       return true
     })
-  }, [enhancedPositions, filters, hideClosed])
+  }, [enhancedPositions, filters, hideClosed, dismissedPositions])
 
   // Sort positions
   const sortedPositions = useMemo(() => {
@@ -850,6 +885,19 @@ export default function Positions() {
             {isEnhancedView ? 'Intelligence View (On)' : 'Standard View'}
           </Button>
 
+          {dismissedPositions.size > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleRestoreDismissed}
+              className="text-amber-500 border-amber-500/40 hover:bg-amber-500/10 hover:text-amber-400"
+              title="Restore dismissed positions"
+            >
+              <Eye className="h-4 w-4 mr-2" />
+              Restore Dismissed ({dismissedPositions.size})
+            </Button>
+          )}
+
           <Button variant="outline" size="sm" onClick={exportToCSV}>
             <Download className="h-4 w-4 mr-2" />
             Export
@@ -990,15 +1038,16 @@ export default function Positions() {
                     <SortableHeader column={0} label="Symbol" className="w-[140px]" />
                     <TableHead className="w-[80px]">Exchange</TableHead>
                     {!isCrypto && <TableHead className="w-[80px]">Product</TableHead>}
-                    <TableHead className="w-[120px]">Strategy</TableHead>
-                    <SortableHeader column={3} label="Qty" className="w-[80px] text-right" />
-                    <SortableHeader column={4} label="Avg Price" className="w-[110px] text-right" />
-                    <TableHead className="w-[110px] text-right">LTP</TableHead>
-                    <TableHead className="w-[110px] text-center">Stop Loss</TableHead>
-                    <TableHead className="w-[110px] text-center">Target</TableHead>
-                    <SortableHeader column={6} label="P&L" className="w-[120px] text-right" />
-                    <SortableHeader column={7} label="P&L %" className="w-[90px] text-right" />
-                    <TableHead className="w-[60px] text-right">Action</TableHead>
+                    <TableHead className="w-[90px]">Type</TableHead>
+                    <TableHead className="w-[160px]">Strategy</TableHead>
+                    <SortableHeader column={3} label="Qty" className="w-[85px] text-right" />
+                    <SortableHeader column={4} label="Avg Price" className="w-[120px] text-right" />
+                    <TableHead className="w-[100px] text-right">LTP</TableHead>
+                    <TableHead className="w-[105px] text-center">Stop Loss</TableHead>
+                    <TableHead className="w-[105px] text-center">Target</TableHead>
+                    <SortableHeader column={6} label="P&L" className="w-[130px] text-right" />
+                    <SortableHeader column={7} label="P&L %" className="w-[95px] text-right" />
+                    <TableHead className="w-[70px] text-right">Action</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -1015,7 +1064,7 @@ export default function Positions() {
                             className="bg-muted/50 cursor-pointer hover:bg-muted"
                             onClick={() => toggleGroup(groupKey)}
                           >
-                            <TableCell colSpan={isCrypto ? 8 : 9}>
+                            <TableCell colSpan={isCrypto ? 9 : 10}>
                               <div className="flex items-center gap-3 py-1 font-semibold">
                                 {isCollapsed ? (
                                   <ChevronRight className="h-4 w-4 text-muted-foreground" />
@@ -1054,6 +1103,7 @@ export default function Positions() {
                         {!isCollapsed &&
                           groupPositions.map((position, index) => {
                             const rowKey = `${position.symbol}-${position.exchange}-${position.product}-${index}`
+                            const posIdentity = `${position.symbol}-${position.exchange}-${position.product}`
                             const isExpanded = expandedPositionKeys.has(rowKey)
 
                             return (
@@ -1087,22 +1137,24 @@ export default function Positions() {
                                       </Badge>
                                     </TableCell>
                                   )}
-                                  <TableCell className="w-[120px]">
-                                    {position.strategy ? (
+                                  <TableCell className="w-[90px]">
+                                    {position.order_type ? (
                                       <Badge
-                                        variant="secondary"
-                                        className="font-mono text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 max-w-[130px] truncate"
-                                        title={position.strategy}
+                                        variant="outline"
+                                        className="font-mono text-[10px] px-1.5 py-0.5 border-border/70 bg-muted/30 text-foreground/80 font-medium whitespace-nowrap"
                                       >
-                                        {position.strategy}
+                                        {position.order_type}
                                       </Badge>
                                     ) : (
-                                      <span className="text-muted-foreground text-xs">-</span>
+                                      <span className="text-muted-foreground text-xs font-mono">-</span>
                                     )}
+                                  </TableCell>
+                                  <TableCell className="w-[160px]">
+                                    <StrategyBadge strategy={position.strategy} />
                                   </TableCell>
                                   <TableCell
                                     className={cn(
-                                      'w-[80px] text-right font-medium',
+                                      'w-[85px] text-right font-medium',
                                       position.quantity === 0
                                         ? 'text-muted-foreground'
                                         : position.quantity > 0
@@ -1111,56 +1163,45 @@ export default function Positions() {
                                     )}
                                   >
                                     {isEnhancedView && position.quantity === 0 && position.closed_qty ? (
-                                      <div className="flex flex-col items-end leading-tight">
-                                        <span className="font-mono text-muted-foreground">0</span>
-                                        <span className="text-[10px] text-muted-foreground/70 font-mono tracking-tight">
-                                          Traded: {position.closed_qty}
+                                      <div className="flex flex-col items-end gap-0.5 leading-none">
+                                        <span className="font-mono text-xs font-semibold text-muted-foreground">0</span>
+                                        <span className="text-xs font-mono font-medium text-foreground/80">
+                                          {position.closed_qty} Traded
                                         </span>
+                                        {position.traded_value ? (
+                                          <span className="text-[10px] font-mono text-muted-foreground/70" title={`Total Turnover: ₹${position.traded_value.toLocaleString('en-IN')}`}>
+                                            ₹{position.traded_value >= 100000 ? `${(position.traded_value / 100000).toFixed(2)}L` : `${(position.traded_value / 1000).toFixed(1)}k`} TO
+                                          </span>
+                                        ) : null}
                                       </div>
                                     ) : (
-                                      position.quantity
+                                      <div className="flex flex-col items-end gap-0.5 leading-none">
+                                        <span className="font-mono font-medium">{position.quantity}</span>
+                                        {isEnhancedView && position.invested_value ? (
+                                          <span className="text-[10px] font-mono text-muted-foreground/70" title={`Invested Capital: ₹${position.invested_value.toLocaleString('en-IN')}`}>
+                                            ₹{position.invested_value >= 100000 ? `${(position.invested_value / 100000).toFixed(2)}L` : `${(position.invested_value / 1000).toFixed(1)}k`}
+                                          </span>
+                                        ) : null}
+                                      </div>
                                     )}
                                   </TableCell>
-                                  <TableCell className="w-[110px] text-right font-mono">
+                                  <TableCell className="w-[120px] text-right font-mono">
                                     {isEnhancedView && position.quantity === 0 && position.entry_price ? (
-                                      <div className="flex flex-col items-end leading-tight">
-                                        <div className="flex items-center gap-1 text-[11px] font-mono">
+                                      <div className="flex flex-col items-end gap-0.5 leading-none">
+                                        <div className="flex items-center gap-1.5 text-xs font-mono">
                                           <span className="text-muted-foreground">₹{position.entry_price.toFixed(2)}</span>
                                           <span className="text-muted-foreground/40">→</span>
-                                          <span className="text-foreground font-medium">₹{(position.exit_price || 0).toFixed(2)}</span>
+                                          <span className="text-foreground font-semibold">₹{(position.exit_price || 0).toFixed(2)}</span>
                                         </div>
-                                        <span className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Entry → Exit</span>
+                                        <span className="text-xs text-muted-foreground/70 font-sans">Entry → Exit</span>
                                       </div>
                                     ) : (
                                       formatCurrency(position.average_price)
                                     )}
                                   </TableCell>
-                                  <TableCell className="w-[110px] text-right font-mono">
+                                  <TableCell className="w-[100px] text-right font-mono">
                                     {position.ltp !== undefined ? (
-                                      <div className="flex flex-col items-end leading-tight">
-                                        <span className="font-mono">{formatCurrency(position.ltp)}</span>
-                                        {isEnhancedView && position.quantity === 0 && position.left_on_table !== undefined && position.left_on_table !== 0 ? (
-                                          <span
-                                            className={cn(
-                                              'text-[10px] font-mono flex items-center gap-0.5 mt-0.5 font-medium',
-                                              position.left_on_table > 0
-                                                ? 'text-amber-400/90'
-                                                : 'text-emerald-400/90'
-                                            )}
-                                            title={
-                                              position.left_on_table > 0
-                                                ? `Left on Table: Price continued favorably after exit. Potential uncaptured gain: ₹${Math.abs(position.left_on_table).toFixed(2)}`
-                                                : `Capital Preserved: Price deteriorated after exit. Loss avoided by exiting: ₹${Math.abs(position.left_on_table).toFixed(2)}`
-                                            }
-                                          >
-                                            {position.left_on_table > 0 ? (
-                                              <>+{formatCurrency(position.left_on_table)} left</>
-                                            ) : (
-                                              <>+{formatCurrency(Math.abs(position.left_on_table))} saved</>
-                                            )}
-                                          </span>
-                                        ) : null}
-                                      </div>
+                                      <span className="font-mono text-sm font-semibold">{formatCurrency(position.ltp)}</span>
                                     ) : (
                                       '-'
                                     )}
@@ -1218,43 +1259,64 @@ export default function Positions() {
 
                                   <TableCell
                                     className={cn(
-                                      'w-[120px] text-right font-medium',
+                                      'w-[130px] text-right font-medium',
                                       isProfit(position.pnl) ? 'text-green-600' : 'text-red-600'
                                     )}
                                   >
-                                    <div className="flex items-center justify-end gap-1">
-                                      {isProfit(position.pnl) ? (
-                                        <TrendingUp className="h-4 w-4" />
-                                      ) : (
-                                        <TrendingDown className="h-4 w-4" />
+                                    <div className="flex flex-col items-end gap-1">
+                                      <div className="flex items-center justify-end gap-1 font-mono text-sm font-bold">
+                                        {isProfit(position.pnl) ? (
+                                          <TrendingUp className="h-4 w-4" />
+                                        ) : (
+                                          <TrendingDown className="h-4 w-4" />
+                                        )}
+                                        {formatCurrency(position.pnl)}
+                                      </div>
+                                      {isEnhancedView && position.quantity === 0 && position.left_on_table !== undefined && position.left_on_table !== 0 && (
+                                        <span
+                                          className={cn(
+                                            'inline-flex items-center px-1.5 py-0.5 rounded text-xs font-mono font-medium border shadow-2xs',
+                                            position.left_on_table > 0
+                                              ? 'bg-amber-500/10 text-amber-400 border-amber-500/25'
+                                              : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25'
+                                          )}
+                                          title={
+                                            position.left_on_table > 0
+                                              ? `Uncaptured upside after exit: ₹${Math.abs(position.left_on_table).toFixed(2)}`
+                                              : `Loss avoided by timely exit: ₹${Math.abs(position.left_on_table).toFixed(2)}`
+                                          }
+                                        >
+                                          {position.left_on_table > 0
+                                            ? `+₹${Math.abs(position.left_on_table).toFixed(0)} left`
+                                            : `+₹${Math.abs(position.left_on_table).toFixed(0)} saved`}
+                                        </span>
                                       )}
-                                      {formatCurrency(position.pnl)}
                                     </div>
                                   </TableCell>
                                   <TableCell
                                     className={cn(
-                                      'w-[90px] text-right',
+                                      'w-[95px] text-right',
                                       isProfit(calculatePnlPercent(position, isEnhancedView))
                                         ? 'text-green-600'
                                         : 'text-red-600'
                                     )}
                                   >
                                     {isEnhancedView && position.quantity === 0 && position.realized_pnl_percent !== undefined ? (
-                                      <div className="flex flex-col items-end leading-tight">
-                                        <span className="font-mono font-medium">
+                                      <div className="flex flex-col items-end gap-0.5 leading-none">
+                                        <span className="font-mono text-xs font-bold">
                                           {position.realized_pnl_percent >= 0 ? '+' : ''}
                                           {position.realized_pnl_percent.toFixed(2)}%
                                         </span>
-                                        <span className="text-[9px] text-muted-foreground/60 uppercase tracking-wider">Realized</span>
+                                        <span className="text-xs text-muted-foreground/70 font-sans">ROI</span>
                                       </div>
                                     ) : (
-                                      <>
+                                      <span className="font-mono text-xs font-medium">
                                         {calculatePnlPercent(position, isEnhancedView) >= 0 ? '+' : ''}
                                         {calculatePnlPercent(position, isEnhancedView).toFixed(2)}%
-                                      </>
+                                      </span>
                                     )}
                                   </TableCell>
-                                  <TableCell className="w-[60px] text-right">
+                                  <TableCell className="w-[80px] text-right">
                                     {position.quantity !== 0 ? (
                                       <Button
                                         variant="ghost"
@@ -1265,74 +1327,43 @@ export default function Positions() {
                                       >
                                         <X className="h-4 w-4" />
                                       </Button>
-                                    ) : isEnhancedView && position.entry_price ? (
-                                      <Button
-                                        variant="ghost"
-                                        size="sm"
-                                        className="h-7 w-7 p-0 text-muted-foreground hover:text-indigo-400 hover:bg-indigo-500/10"
-                                        onClick={() => toggleExpandPosition(rowKey)}
-                                        title={isExpanded ? 'Collapse post-trade details' : 'Expand post-trade details'}
-                                      >
-                                        {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                                      </Button>
-                                    ) : null}
+                                    ) : (
+                                      <div className="flex items-center justify-end gap-1">
+                                        {isEnhancedView && position.entry_price ? (
+                                          <Button
+                                            variant="ghost"
+                                            size="icon"
+                                            className={cn(
+                                              'h-7 w-7 transition-colors border',
+                                              isExpanded
+                                                ? 'bg-primary/15 text-primary border-primary/30'
+                                                : 'text-muted-foreground hover:text-foreground hover:bg-muted border-border/50'
+                                            )}
+                                            onClick={() => toggleExpandPosition(rowKey)}
+                                            title={isExpanded ? 'Collapse post-trade HUD' : 'Expand post-trade HUD'}
+                                          >
+                                            {isExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                                          </Button>
+                                        ) : null}
+                                        <Button
+                                          variant="ghost"
+                                          size="icon"
+                                          className="h-7 w-7 text-muted-foreground hover:text-destructive hover:bg-destructive/10 border border-transparent hover:border-destructive/30"
+                                          onClick={() => handleDismissPosition(posIdentity)}
+                                          title="Dismiss closed position (soft delete)"
+                                        >
+                                          <EyeOff className="h-3.5 w-3.5" />
+                                        </Button>
+                                      </div>
+                                    )}
                                   </TableCell>
                                 </TableRow>
 
                                 {/* Expandable Post-Trade Intelligence Drawer */}
                                 {isExpanded && isEnhancedView && position.quantity === 0 && (
                                   <TableRow className="bg-muted/10 border-b border-border/40 hover:bg-muted/15 transition-colors">
-                                    <TableCell colSpan={isCrypto ? 9 : 10} className="p-3">
-                                      <div className="p-3.5 rounded-lg bg-card/80 border border-indigo-500/20 text-xs flex flex-wrap items-center justify-between gap-4 font-mono shadow-sm">
-                                        <div className="flex items-center gap-6">
-                                          <div>
-                                            <span className="text-muted-foreground uppercase text-[10px] block">Entry Avg</span>
-                                            <span className="text-foreground font-semibold">₹{(position.entry_price || 0).toFixed(2)}</span>
-                                          </div>
-                                          <div>
-                                            <span className="text-muted-foreground uppercase text-[10px] block">Exit Avg</span>
-                                            <span className="text-foreground font-semibold">₹{(position.exit_price || 0).toFixed(2)}</span>
-                                          </div>
-                                          <div>
-                                            <span className="text-muted-foreground uppercase text-[10px] block">Closed Qty</span>
-                                            <span className="text-foreground font-semibold">{position.closed_qty || '-'}</span>
-                                          </div>
-                                          <div>
-                                            <span className="text-muted-foreground uppercase text-[10px] block">Realized Return</span>
-                                            <span className={cn('font-semibold', isProfit(position.realized_pnl_percent || 0) ? 'text-green-500' : 'text-red-500')}>
-                                              {(position.realized_pnl_percent || 0) >= 0 ? '+' : ''}{(position.realized_pnl_percent || 0).toFixed(2)}%
-                                            </span>
-                                          </div>
-                                        </div>
-                                        <div className="flex items-center gap-6">
-                                          <div>
-                                            <span className="text-muted-foreground uppercase text-[10px] block">Current Live LTP</span>
-                                            <span className="text-foreground font-semibold">₹{(position.ltp || 0).toFixed(2)}</span>
-                                          </div>
-                                          <div>
-                                            <span className="text-muted-foreground uppercase text-[10px] block">Counterfactual (If Held)</span>
-                                            <span className={cn('font-semibold', isProfit(position.counterfactual_pnl || 0) ? 'text-green-500' : 'text-red-500')}>
-                                              {(position.counterfactual_pnl || 0) >= 0 ? '+' : ''}₹{(position.counterfactual_pnl || 0).toFixed(2)}
-                                            </span>
-                                          </div>
-                                          <div>
-                                            <span className="text-muted-foreground uppercase text-[10px] block">Exit Alpha</span>
-                                            <Badge
-                                              variant="outline"
-                                              className={cn(
-                                                'font-mono text-xs',
-                                                (position.left_on_table || 0) > 0
-                                                  ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
-                                                  : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                                              )}
-                                            >
-                                              {(position.left_on_table || 0) > 0
-                                                ? `+₹${Math.abs(position.left_on_table || 0).toFixed(2)} Left on Table`
-                                                : `+₹${Math.abs(position.left_on_table || 0).toFixed(2)} Capital Preserved`}
-                                            </Badge>
-                                          </div>
-                                        </div>
-                                      </div>
+                                    <TableCell colSpan={isCrypto ? 12 : 13} className="p-3">
+                                      <PostTradeIntelligenceDrawer position={position} />
                                     </TableCell>
                                   </TableRow>
                                 )}
@@ -1345,7 +1376,7 @@ export default function Positions() {
                 </TableBody>
                 <TableFooter>
                   <TableRow className="bg-muted/50">
-                    <TableCell colSpan={isCrypto ? 8 : 9} className="text-right text-muted-foreground">
+                    <TableCell colSpan={isCrypto ? 9 : 10} className="text-right text-muted-foreground">
                       Total P&L:
                     </TableCell>
                     <TableCell

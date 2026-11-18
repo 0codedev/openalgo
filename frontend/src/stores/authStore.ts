@@ -7,6 +7,7 @@ interface User {
   broker: string | null
   isLoggedIn: boolean
   loginTime: string | null
+  rememberMe?: boolean
 }
 
 interface AuthStore {
@@ -16,7 +17,7 @@ interface AuthStore {
 
   setUser: (user: User) => void
   setApiKey: (apiKey: string | null) => void
-  login: (username: string, broker: string) => void
+  login: (username: string, broker: string, rememberMe?: boolean) => void
   logout: () => void
   checkSession: () => boolean
 }
@@ -32,12 +33,13 @@ export const useAuthStore = create<AuthStore>()(
 
       setApiKey: (apiKey) => set({ apiKey }),
 
-      login: (username, broker) => {
+      login: (username, broker, rememberMe = true) => {
         const user: User = {
           username,
           broker,
           isLoggedIn: true,
           loginTime: new Date().toISOString(),
+          rememberMe,
         }
         set({ user, isAuthenticated: true })
       },
@@ -49,6 +51,11 @@ export const useAuthStore = create<AuthStore>()(
       checkSession: () => {
         const { user } = get()
         if (!user || !user.loginTime) return false
+
+        // Skip session expiry if Remember Me is active
+        if (user.rememberMe) {
+          return true
+        }
 
         // Skip session expiry for crypto brokers (24/7 markets)
         const capabilities = useBrokerStore.getState().capabilities

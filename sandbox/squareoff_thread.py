@@ -171,7 +171,7 @@ def _schedule_square_off_jobs(scheduler):
     # This captures the end-of-day P&L for historical reporting
     try:
         import os
-        from datetime import date
+        from datetime import date, datetime
         from decimal import Decimal
 
         def capture_daily_pnl_snapshot():

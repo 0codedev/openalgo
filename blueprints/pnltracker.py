@@ -1025,14 +1025,63 @@ def get_pnl_data():
                 }
             ), 200
 
+        # Check if all positions are closed (flat book)
+        all_positions_closed = True
+        if current_positions:
+            for pos_key, pos_val in current_positions.items():
+                if abs(float(pos_val.get("quantity", 0))) > 0:
+                    all_positions_closed = False
+                    break
+
+        # Calculate ground-truth realized PnL from trades/funds when book is flat
+        ground_truth_pnl = None
+        if all_positions_closed:
+            # 1. Try sandbox funds if available
+            try:
+                from database.sandbox_db import SandboxFunds
+                user_funds = SandboxFunds.query.filter_by(user_id=login_username).first()
+                if user_funds and user_funds.today_realized_pnl is not None:
+                    ground_truth_pnl = float(user_funds.today_realized_pnl)
+            except Exception as e:
+                logger.debug(f"Could not read sandbox funds: {e}")
+
+            # 2. If no sandbox funds, compute directly from tradebook cash flows
+            if ground_truth_pnl is None and trades:
+                try:
+                    cash_flow = 0.0
+                    for t in trades:
+                        t_act = str(t.get("action", "")).upper()
+                        t_qty = float(t.get("quantity", 0))
+                        t_prc = float(t.get("price", 0))
+                        if t_act == "SELL":
+                            cash_flow += t_qty * t_prc
+                        elif t_act == "BUY":
+                            cash_flow -= t_qty * t_prc
+                    ground_truth_pnl = round(cash_flow, 2)
+                except Exception as e:
+                    logger.debug(f"Could not compute tradebook cash flow: {e}")
+
+        # If flat book and ground truth is known, anchor the terminal curve endpoint
+        if all_positions_closed and ground_truth_pnl is not None and not portfolio_pnl.empty:
+            logger.info(
+                f"Flat book detected. Anchoring terminal curve from {portfolio_pnl['Total_PnL'].iloc[-1]} "
+                f"to ground-truth settled PnL {ground_truth_pnl}"
+            )
+            portfolio_pnl.iloc[-1, portfolio_pnl.columns.get_loc("Total_PnL")] = ground_truth_pnl
+
         # Calculate drawdown
         portfolio_pnl["Peak"] = portfolio_pnl["Total_PnL"].cummax()
         portfolio_pnl["Drawdown"] = portfolio_pnl["Total_PnL"] - portfolio_pnl["Peak"]
 
         # Calculate metrics
         latest_mtm = portfolio_pnl["Total_PnL"].iloc[-1] if not portfolio_pnl.empty else 0
+        if all_positions_closed and ground_truth_pnl is not None:
+            latest_mtm = ground_truth_pnl
         max_mtm = portfolio_pnl["Total_PnL"].max() if not portfolio_pnl.empty else 0
         min_mtm = portfolio_pnl["Total_PnL"].min() if not portfolio_pnl.empty else 0
+        if all_positions_closed and ground_truth_pnl is not None:
+            max_mtm = max(max_mtm, latest_mtm)
+            min_mtm = min(min_mtm, latest_mtm)
         max_drawdown = portfolio_pnl["Drawdown"].min() if not portfolio_pnl.empty else 0
 
         try:
@@ -1080,6 +1129,11 @@ def get_pnl_data():
                 except Exception as e:
                     logger.warning(f"Error processing row {idx}: {e}")
                     continue
+
+        if all_positions_closed and ground_truth_pnl is not None and pnl_series:
+            pnl_series[-1]["value"] = round(ground_truth_pnl, 2)
+            if drawdown_series and not portfolio_pnl.empty:
+                drawdown_series[-1]["value"] = round(float(portfolio_pnl["Drawdown"].iloc[-1]), 2)
 
         logger.info(
             f"Final metrics - Current: {latest_mtm}, Max: {max_mtm}, Min: {min_mtm}, Drawdown: {max_drawdown}"
